@@ -1,40 +1,47 @@
-"""labeler_app.py  –  hlavní logika + logy
--------------------------------------------------
-* NEW: parametr include_sent (bool)
-        - True  → vyhledává i zprávy ze složky SENT
-        - False → filtruje jen INBOX (příchozí)
--------------------------------------------------
-"""
+"""labeler_app.py – označování + LLM klasifikace + logy
+---------------------------------------------------------------------
+* includ_sent  – jestli sahat i na odeslanou poštu
+* PROCESSED    – po úspěšné klasifikaci už nikdy znovu
+* LLM          – Ollama/Mistral/DeepSeek → positive/negative/neutral
+--------------------------------------------------------------------"""
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-import logging, time, schedule
+import logging, time, schedule, base64, email, email.policy
 from typing import List
 
 from gmail_client   import GmailClient
 from label_manager  import LabelManager
 from message_filter import MessageFilter
 from forwarder      import Forwarder
+from llm_classifier import LLMClassifier
 
 
-# ── Konfig dataclass ──────────────────────────────────────────────────
+# ── konfigurace profilu (loader vyplní všechno) ─────────────────────
 @dataclass
 class AppConfig:
     main_label: str
     intersection_labels: List[str]
     vyhovuje_color: str = "#16a766"
+
+    # zdroje dat
     keywords_file: str | None = "keywords.txt"
     emails_file:   str | None = "emails.txt"
-    forward_to: str | None = None
-    log_file:   str = "log.txt"
-
-    # doplňková pole (plní loader)
     keywords:      List[str] | None = None
     senders:       List[str] | None = None
-    schedule:      int       | None = None
-    include_sent:  bool      = False      # ← NEW
+
+    # plány / směrování
+    schedule:     int  | None = None
+    forward_to:   str  | None = None
+    include_sent: bool = False
+
+    # LLM
+    llm_model:      str   = "mistral:instruct"
+    llm_confidence: float = 0.20         # ±-zóna pro neutral
+    log_file:       str   = "log.txt"
 
 
+# ── util – načti txt soubor do listu --------------------------------
 def _load_list(path: str | Path | None) -> List[str]:
     if not path: return []
     p = Path(path)
@@ -42,16 +49,15 @@ def _load_list(path: str | Path | None) -> List[str]:
     return [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
-# ── Hlavní třída ───────────────────────────────────────────────────────
+# ── hlavní třída ────────────────────────────────────────────────────
 class LabelerApp:
-    def __init__(self, gmail: GmailClient, config: AppConfig, *, include_sent: bool | None = None):
+    def __init__(self, gmail: GmailClient, cfg: AppConfig, *, include_sent: bool | None = None):
         self.gmail  = gmail
-        self.config = config
-        self.include_sent = config.include_sent if include_sent is None else include_sent
+        self.cfg    = cfg
 
         if not logging.getLogger().hasHandlers():
             logging.basicConfig(
-                filename=config.log_file,
+                filename=cfg.log_file,
                 level=logging.INFO,
                 format="%(asctime)s - %(levelname)s - %(message)s",
                 encoding="utf-8",
@@ -59,54 +65,112 @@ class LabelerApp:
 
         self.labels  = LabelManager(gmail)
         self.filters = MessageFilter(
-            gmail,
-            self.labels,
-            intersection_labels=config.intersection_labels,
-            include_sent=self.include_sent,              # ← pass down
+            gmail, self.labels,
+            intersection_labels=cfg.intersection_labels,
+            include_sent=cfg.include_sent,
         )
-        self.forwarder = Forwarder(gmail, forward_to=config.forward_to) if config.forward_to else None
+        self.llm       = LLMClassifier(cfg.llm_model, neutrality=cfg.llm_confidence)
+        self.forwarder = Forwarder(gmail, forward_to=cfg.forward_to) if cfg.forward_to else None
 
-    # ------------------------------------------------------------------
+        # štítky pro výsledky + PROCESSED
+        ml = cfg.main_label
+        parent_id = self.labels.get_or_create(ml)  # ← zajistí rodiče
+
+        self.pos_id = self.labels.get_or_create(f"{ml}/POZITIVNÍ ODPOVĚĎ")
+        self.neg_id = self.labels.get_or_create(f"{ml}/NEGATIVNÍ ODPOVĚĎ")
+        self.neu_id = self.labels.get_or_create(f"{ml}/NEUTRÁLNÍ ODPOVĚĎ")
+        self.done_id = self.labels.get_or_create(f"{ml}/PROCESSED")
+
+        C_POS = "#16a766"  # zelená
+        C_NEG = "#d93025"  # červená
+        C_NEU = "#eab308"  # žlutá / oranžová
+        # C_POS = "#34A853"  # zelená
+        # C_NEG = "#EA4335"  # červená
+        # C_NEU = "#FABB05"  # žlutá
+        # C_DONE = "#B0B0B0"  # šedá
+
+        self.pos_id = self.labels.get_or_create(f"{ml}/POZITIVNÍ ODPOVĚĎ", color_hex=C_POS)
+        self.neg_id = self.labels.get_or_create(f"{ml}/NEGATIVNÍ ODPOVĚĎ", color_hex=C_NEG)
+        self.neu_id = self.labels.get_or_create(f"{ml}/NEUTRÁLNÍ ODPOVĚĎ", color_hex=C_NEU)
+        self.done_id = self.labels.get_or_create(f"{ml}/PROCESSED", color_hex="#9aa0a6")
+
+        print(f"[DEBUG] Profil {cfg.main_label!r} → LLM = {cfg.llm_model}")
+
+    # ────────────────────────────────────────────────────────────────
     def run_once(self):
         acct = self.gmail.user_email
-        logging.info("=== run_once %s (include_sent=%s) ===", acct, self.include_sent)
         print(f"\n=== {acct} ===")
+        logging.info("run_once %s (include_sent=%s)", acct, self.cfg.include_sent)
 
-        main_id   = self.labels.get_or_create(self.config.main_label)
-        vyh_path  = f"{self.config.main_label}/VYHOVUJE"
-        vyh_id    = self.labels.get_or_create(vyh_path, color_hex=self.config.vyhovuje_color)
+        total_kw = total_from = total_int = 0
 
-        total_kw = total_sender = total_inter = 0
-
-        kw_list = self.config.keywords if self.config.keywords is not None else _load_list(self.config.keywords_file)
+        # ------- klíčová slova --------------------------------------
+        kw_list = self.cfg.keywords if self.cfg.keywords is not None else _load_list(self.cfg.keywords_file)
         for kw in kw_list:
             msgs = self.filters.matching_keywords([kw])
             print(f"🔍 KW '{kw}': {len(msgs)}")
-            logging.info("KW '%s' → %d", kw, len(msgs))
-            for m in msgs: self.gmail.modify_labels(m["id"], add=[main_id])
+            for m in msgs:
+                if self._already_done(m["id"]): continue
+                self._classify_and_tag(m["id"])
             total_kw += len(msgs)
 
-        snd_list = self.config.senders if self.config.senders is not None else _load_list(self.config.emails_file)
+        # ------- odesílatelé ----------------------------------------
+        snd_list = self.cfg.senders if self.cfg.senders is not None else _load_list(self.cfg.emails_file)
         for s in snd_list:
             msgs = self.filters.matching_senders([s])
             print(f"🔍 FROM '{s}': {len(msgs)}")
-            logging.info("FROM '%s' → %d", s, len(msgs))
-            for m in msgs: self.gmail.modify_labels(m["id"], add=[main_id])
-            total_sender += len(msgs)
+            for m in msgs:
+                if self._already_done(m["id"]): continue
+                self._classify_and_tag(m["id"])
+            total_from += len(msgs)
 
+        # ------- průnik štítků --------------------------------------
         inter_msgs = self.filters.matching_intersection()
         print(f"🔍 INTERSECTION: {len(inter_msgs)}")
-        logging.info("INTERSECTION → %d", len(inter_msgs))
         for m in inter_msgs:
-            self.gmail.modify_labels(m["id"], add=[vyh_id])
-            if self.forwarder: self.forwarder.forward(m["id"], vyh_path)
-        total_inter = len(inter_msgs)
+            if self._already_done(m["id"]): continue
+            self._classify_and_tag(m["id"])
+        total_int = len(inter_msgs)
 
-        total = total_kw + total_sender + total_inter
-        print(f"✅ KW:{total_kw} FROM:{total_sender} VYH:{total_inter}  → {total} celkem")
-        logging.info("SUMMARY %s → %d total", acct, total)
+        print(f"✅ KW:{total_kw} FROM:{total_from} INT:{total_int}")
 
-    # ------------------------------------------------------------------
+    # ── pomocné metody ───────────────────────────────────────────────
+    def _already_done(self, msg_id: str) -> bool:
+        meta = self.gmail._service.users().messages().get(
+            userId="me", id=msg_id, format="metadata", metadataHeaders=[]
+        ).execute()
+        return self.done_id in meta.get("labelIds", [])
+
+    def _classify_and_tag(self, msg_id: str):
+        text = self._plain_text(msg_id)
+        sentiment = self.llm.predict(text)
+
+        tag = {"positive": self.pos_id,
+               "negative": self.neg_id,
+               "neutral":  self.neu_id}[sentiment]
+
+        self.gmail.modify_labels(
+            msg_id,
+            remove=[self.pos_id, self.neg_id, self.neu_id],
+        )
+
+        self.gmail.modify_labels(msg_id,add=[tag, self.done_id, self.labels.id(self.cfg.main_label)]  # ← tady
+        )
+
+        if sentiment == "positive" and self.forwarder:
+            self.forwarder.forward(msg_id, f"{self.cfg.main_label}/POZITIVNÍ ODPOVĚĎ")
+
+        logging.info("msg %s → %s", msg_id, sentiment)
+
+    def _plain_text(self, msg_id: str) -> str:
+        raw = self.gmail.get_message_raw(msg_id)
+        eml = email.message_from_bytes(base64.urlsafe_b64decode(raw), policy=email.policy.default)
+        if eml.is_multipart():
+            part = eml.get_body(("plain",)) or eml.get_body() or eml
+            return part.get_content()
+        return eml.get_content()
+
+    # ── scheduler wrapper (beze změny) ------------------------------
     def schedule(self, every_minutes: int):
         self.run_once()
         schedule.every(every_minutes).minutes.do(self.run_once)

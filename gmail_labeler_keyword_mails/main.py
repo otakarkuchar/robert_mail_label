@@ -26,13 +26,16 @@ def load_profiles() -> List[AppConfig]:
             data: Dict[str, Any] = json.load(f)
 
         cfg = AppConfig(
-            main_label          = data["main_label"],
-            intersection_labels = data.get("intersection_labels", [data["main_label"]]),
-            vyhovuje_color      = data.get("vyhovuje_color", "#16a766"),
-            forward_to          = data.get("forward_to"),
-            keywords_file       = None,
-            emails_file         = None,
+            main_label=data["main_label"],
+            intersection_labels=data.get("intersection_labels", [data["main_label"]]),
+            vyhovuje_color=data.get("vyhovuje_color", "#16a766"),
+            forward_to=data.get("forward_to"),
+            keywords_file=None,
+            emails_file=None,
+            llm_model=data.get("llm_model", "mistral"),  # ← přidáno
+            llm_confidence=data.get("llm_confidence", 0.20),  # ← a rovnou i threshold
         )
+
         cfg.keywords     = data.get("keywords", [])
         cfg.senders      = data.get("senders", [])
         cfg.schedule     = data.get("schedule_minutes")
