@@ -1,10 +1,5 @@
-"""profile_creator.py
-----------------------------------------------------------------------
-Vytváří JSON profil (jeden hlavní štítek = jeden soubor) v `profiles/`.
-
-Novinka ➜  hlavní štítek se vždy přidá do keywords[], pokud tam už není,
-takže uživatel ho nemusí opisovat v promptu pro klíčová slova.
-----------------------------------------------------------------------
+"""profile_creator.py – tvorba JSON profilu
+* NEW: dotaz „Zahrnout odeslané zprávy? (y/N)“  → include_sent bool
 """
 from __future__ import annotations
 from dataclasses import asdict, dataclass
@@ -14,7 +9,7 @@ import json, re
 PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
 PROFILES_DIR.mkdir(exist_ok=True)
 
-# ──────────────────────────────────────────────────────────────────────
+
 @dataclass
 class ProfileData:
     main_label: str
@@ -25,73 +20,59 @@ class ProfileData:
     forward_to: str | None = None
     header_name: str = "X-Label"
     schedule_minutes: int | None = None
-# ──────────────────────────────────────────────────────────────────────
+    include_sent: bool = False          # ← NEW
 
 
 class ProfileCreator:
     @staticmethod
-    def _slugify(text: str) -> str:
-        text = text.strip().replace(" ", "_")
-        return re.sub(r"[^A-Za-z0-9_\-]", "", text)
+    def _slugify(t: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_\-]", "", t.strip().replace(" ", "_"))
 
     @classmethod
-    def create_profile(cls, data: ProfileData, *, overwrite: bool = False) -> Path:
-        filename = cls._slugify(data.main_label) + ".json"
-        path = PROFILES_DIR / filename
-
+    def create_profile(cls, data: ProfileData, *, overwrite=False) -> Path:
+        path = PROFILES_DIR / (cls._slugify(data.main_label) + ".json")
         if path.exists() and not overwrite:
-            raise FileExistsError(f"Profil už existuje ({path}). "
-                                  "Nastav overwrite=True, pokud ho chceš přepsat.")
-
+            raise FileExistsError(f"Profil existuje: {path}")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(asdict(data), f, ensure_ascii=False, indent=2)
         return path
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Interaktivní CLI
-# ──────────────────────────────────────────────────────────────────────
+# ── jednoduché CLI ─────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("=== Nový profil (JSON) ===")
+    print("=== Nový profil ===")
     main_label = input("Hlavní štítek: ").strip()
-    if not main_label:
-        print("❌ Musí být vyplněn."); exit(1)
+    if not main_label: print("Nutné vyplnit!"); exit(1)
 
-    # ---- klíčová slova -------------------------------------------------
-    kw_input = input("Klíčová slova (čárkou): ").strip()
-    keywords = [w.strip() for w in kw_input.split(",") if w.strip()] if kw_input else []
+    kw_in  = input("Klíčová slova (čárkou): ").strip()
+    kws = [w.strip() for w in kw_in.split(",") if w.strip()] if kw_in else []
+    if main_label not in kws: kws.insert(0, main_label)
 
-    # automaticky přidáme hlavní štítek, pokud tam chybí
-    if main_label not in keywords:
-        keywords.insert(0, main_label)
+    snd_in = input("Odesílatelé (čárkou): ").strip()
+    snds = [s.strip() for s in snd_in.split(",") if s.strip()] if snd_in else []
 
-    # ---- odesílatelé ---------------------------------------------------
-    snd_input = input("Odesílatelé (čárkou): ").strip()
-    senders = [s.strip() for s in snd_input.split(",") if s.strip()] if snd_input else []
-
-    # ---- intersection štítky ------------------------------------------
     intr_default = f"{main_label}/POZITIVNÍ ODPOVĚĎ"
-    inter_input = input(f"Intersection štítky (Enter → '{intr_default}'): ").strip()
-    intersection_labels = (
-        [main_label, inter_input] if inter_input else [main_label, intr_default]
-    )
+    intr_in = input(f"Intersection štítky (Enter → '{intr_default}'): ").strip()
+    intersection = [main_label, intr_in or intr_default]
 
-    # ---- forwarding & schedule ----------------------------------------
-    forward_to = input("Forward na adresu (Enter = neforwardovat): ").strip() or None
-    sch_in = input("Schedule minut (Enter = jen ručně): ").strip()
-    schedule_minutes = int(sch_in) if sch_in else None
+    fwd = input("Forward na adresu (Enter = žádný): ").strip() or None
+    sch = input("Scheduler minut (Enter = ručně): ").strip()
+    sched = int(sch) if sch else None
 
-    pdata = ProfileData(
+    inc_sent = input("Zahrnout odeslané zprávy? (y/N): ").strip().lower().startswith("y")
+
+    data = ProfileData(
         main_label          = main_label,
-        keywords            = keywords,
-        senders             = senders,
-        intersection_labels = intersection_labels,
-        forward_to          = forward_to,
-        schedule_minutes    = schedule_minutes,
+        keywords            = kws,
+        senders             = snds,
+        intersection_labels = intersection,
+        forward_to          = fwd,
+        schedule_minutes    = sched,
+        include_sent        = inc_sent,
     )
 
     try:
-        path = ProfileCreator.create_profile(pdata)
-        print(f"✅ Profil uložen → {path}")
+        p = ProfileCreator.create_profile(data)
+        print("✅ Uloženo:", p)
     except FileExistsError as e:
         print(e)

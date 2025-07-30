@@ -1,15 +1,9 @@
-"""message_filter.py
-------------------------------------------------------------------
-Obsahuje logiku *výběru zpráv*, nikoli jejich označování.
+"""message_filter.py – hledání zpráv podle kw / sender / průniku.
 
-* matching_keywords(words)   – klíčová slova v předmětu či těle
-* matching_senders(emails)   – od konkrétních odesílatelů
-* matching_intersection()    – zprávy, které mají VŠECHNY zadané štítky
-
-Každá metoda vrací seznam dictů přesně tak,
-jak je vrací Gmail API (tj. alespoň {"id": …}).
-------------------------------------------------------------------
-"""
+Nové:
+* parametr include_sent → když je False, každé list_messages()
+  obdrží labelIds=["INBOX"]  (dostaneme pouze příchozí).
+------------------------------------------------------------------"""
 from __future__ import annotations
 from typing import List, Dict
 from gmail_client import GmailClient
@@ -17,48 +11,52 @@ from label_manager import LabelManager
 
 
 class MessageFilter:
-    """Jeden účet + jeho konfig a efektivní vyhledávací metody."""
-
     def __init__(
         self,
         gmail: GmailClient,
         label_mgr: LabelManager,
         *,
         intersection_labels: List[str],
+        include_sent: bool = False,
     ):
-        self.gmail = gmail
-        self.labels = label_mgr
+        self.gmail   = gmail
+        self.labels  = label_mgr
         self.intersection_labels = intersection_labels
+        self._label_filter = [] if include_sent else ["INBOX"]
 
-    # ------------------------------------------------------------------
-    # 1) Klíčová slova
     # ------------------------------------------------------------------
     def matching_keywords(self, words: List[str]) -> List[Dict]:
         msgs: List[Dict] = []
         for w in words:
-            msgs.extend(self.gmail.list_messages(q=w))
+            msgs.extend(
+                self.gmail.list_messages(q=w, label_ids=self._label_filter)
+            )
         return msgs
 
-    # ------------------------------------------------------------------
-    # 2) Odesílatelé
     # ------------------------------------------------------------------
     def matching_senders(self, senders: List[str]) -> List[Dict]:
         msgs: List[Dict] = []
         for s in senders:
-            msgs.extend(self.gmail.list_messages(q=f"from:{s}"))
+            msgs.extend(
+                self.gmail.list_messages(q=f"from:{s}", label_ids=self._label_filter)
+            )
         return msgs
 
     # ------------------------------------------------------------------
-    # 3) Průnik štítků
-    # ------------------------------------------------------------------
     def matching_intersection(self) -> List[Dict]:
-        # Přeložit názvy na ID (ignorujeme chybějící)
-        ids = [
-            self.labels.id(name) for name in self.intersection_labels
-            if self.labels.id(name)
-        ]
+        # nejdřív intersection štítků, pak případně filtr INBOX
+        ids = [self.labels.id(n) for n in self.intersection_labels if self.labels.id(n)]
         if len(ids) != len(self.intersection_labels):
-            print("[MessageFilter] ⚠️  Některé štítky pro průnik nebyly nalezeny.")
-            return []
+            print("[MessageFilter] ⚠️ chybějící štítek v průniku"); return []
 
-        return self.gmail.list_messages(label_ids=ids)
+        base = self.gmail.list_messages(label_ids=ids)
+        if not self._label_filter:
+            return base                              # chceme i SENT
+
+        # musíme zkontrolovat, že zpráva má také INBOX (jinak to může být jen SENT)
+        with_inbox = []
+        for m in base:
+            meta = self.gmail._service.users().messages().get(userId="me", id=m["id"], format="metadata", metadataHeaders=[]).execute()
+            if "INBOX" in meta.get("labelIds", []):
+                with_inbox.append(m)
+        return with_inbox
