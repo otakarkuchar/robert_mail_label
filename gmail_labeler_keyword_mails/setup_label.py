@@ -32,7 +32,7 @@ LABEL_NAME = "3D CompaniesXXX"          # rodičovský štítek pro body 1–2
 
 # Průnik štítků, které e‑mail MUSÍ současně mít, aby dostal pod‑štítek „VYHOVUJE“.
 # ⚠️ PRVNÍ položka = rodič pro vnořený VYHOVUJE štítek.
-INTERSECTION_LABELS = ["3D CompaniesXXX", f"{LABEL_NAME}/POZITIVNÍ ODPOVĚĎ"]
+INTERSECTION_LABELS = ["3D CompaniesXXX", f"POZITIVNÍ ODPOVĚĎ"]
 
 # Gmail povoluje jen určitou paletu barev štítků → použijeme oficiální světle zelenou
 VYHOVUJE_COLOR = "#16A766"   # hezky zelená pro nový pod‑štítek
