@@ -28,13 +28,15 @@ KEYWORDS_FILE = "keywords.txt"      # klíčová slova k vyhledání v textu/př
 EMAILS_FILE   = "emails.txt"        # seznam e‑mailových adres odesílatelů
 LOG_FILE      = "log.txt"
 
-LABEL_NAME = "3D CompaniesXXX"          # rodičovský štítek pro body 1–2
+MAIN_LABEL = "3D CompaniesXXX"          # rodičovský štítek pro body 1–2
 
 # Průnik štítků, které e‑mail MUSÍ současně mít, aby dostal pod‑štítek „VYHOVUJE“.
 # ⚠️ PRVNÍ položka = rodič pro vnořený VYHOVUJE štítek.
-INTERSECTION_LABELS = ["3D CompaniesXXX", f"POZITIVNÍ ODPOVĚĎ"]
+INTERSECTION_LABELS = [MAIN_LABEL, f"{MAIN_LABEL}/POZITIVNÍ ODPOVĚĎ"]
 
 # Gmail povoluje jen určitou paletu barev štítků → použijeme oficiální světle zelenou
+# Podle oficiální palety Gmail API (viz https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.labels)
+# použijeme sytou zelenou #16A766 (RGB 22,167,102), která je v povoleném seznamu
 VYHOVUJE_COLOR = "#16A766"   # hezky zelená pro nový pod‑štítek
 
 # ─── Logging ────────────────────────────────────────────────────────────────
@@ -73,27 +75,52 @@ def gmail_authenticate(user_email: str):
 # ─── Štítky ─────────────────────────────────────────────────────────────────
 
 def get_or_create_label(service, name: str, *, color_hex: str | None = None) -> str:
-    """Najde nebo vytvoří štítek (a zkusí nastavit barvu z povolené palety).
+    """Vrátí ID štítku; pokud neexistuje, vytvoří ho.
 
-    Pokud Gmail API barvu odmítne (400 invalidArgument), štítek se prostě vytvoří
-    bez barvy a skript pokračuje dál.
+    * Když existuje a `color_hex` je z palety, nastaví barvu pomocí **patch** (bez nutnosti
+      posílat zbytek objektu).
+    * Pokud patch selže (třeba kvůli špatné barvě), pokračuje bez barvy.
     """
+    color_hex = color_hex.lower() if color_hex else None  # Gmail uvádí barvy malými písmeny
+
+    # 1️⃣  Zkus najít už existující štítek ----------------------------------
     existing = service.users().labels().list(userId="me").execute().get("labels", [])
     for lbl in existing:
         if lbl["name"].lower() == name.lower():
             label_id = lbl["id"]
-            # pokus o nastavení barvy (ignorujeme případné InvalidArgument)
-            if color_hex:
+            if color_hex and lbl.get("color", {}).get("backgroundColor") != color_hex:
                 try:
-                    service.users().labels().update(
+                    service.users().labels().patch(
                         userId="me",
                         id=label_id,
                         body={"color": {"backgroundColor": color_hex, "textColor": "#000000"}},
                     ).execute()
+                    logging.info(f"Barva štítku '{name}' nastavena na {color_hex} (patch).")
                 except HttpError as e:
-                    if e.resp.status == 400:
-                        logging.info(f"API odmítlo barvu {color_hex} pro štítek '{name}', pokračuji bez ní.")
+                    logging.info(f"Patch barvy '{color_hex}' pro '{name}' odmítnut ({e.resp.status}).")
             return label_id
+
+    # 2️⃣  Štítek neexistuje → vytvoříme -----------------------------------
+    body = {
+        "name": name,
+        "labelListVisibility": "labelShow",
+        "messageListVisibility": "show",
+    }
+    created = service.users().labels().create(userId="me", body=body).execute()
+    label_id = created["id"]
+
+    # 3️⃣  Dodatečný patch barvy (ignorujeme error) -------------------------
+    if color_hex:
+        try:
+            service.users().labels().patch(
+                userId="me",
+                id=label_id,
+                body={"color": {"backgroundColor": color_hex, "textColor": "#000000"}},
+            ).execute()
+            logging.info(f"Barva štítku '{name}' nastavena na {color_hex} (post‑create patch).")
+        except HttpError as e:
+            logging.info(f"Patch barvy '{color_hex}' pro '{name}' odmítnut ({e.resp.status}).")
+    return label_id
 
     body = {
         "name": name,
@@ -190,10 +217,10 @@ def label_matching_emails(user_email: str):
     service = gmail_authenticate(user_email)
 
     # a) připrav štítky
-    companies_id = get_or_create_label(service, LABEL_NAME)
+    companies_id = get_or_create_label(service, MAIN_LABEL)
     vyhovuje_path = f"{INTERSECTION_LABELS[0]}/VYHOVUJE"
     vyhovuje_id  = get_or_create_label(service, vyhovuje_path, color_hex=VYHOVUJE_COLOR)
-    print(f"Štítek pro klíčová slova / adresy: {LABEL_NAME} (ID {companies_id})")
+    print(f"Štítek pro klíčová slova / adresy: {MAIN_LABEL} (ID {companies_id})")
     print(f"Štítek pro průnik:             {vyhovuje_path} (ID {vyhovuje_id})")
 
     total = 0
