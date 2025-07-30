@@ -9,28 +9,46 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+"""gmail_labeler_intersection.py
+----------------------------------------------------------------------
+Označuje příchozí e‑maily podle:
+  1. klíčových slov (soubor keywords.txt)
+  2. odesílatele       (soubor emails.txt)
+  3. průniku štítků    (INTERSECTION_LABELS)
+
+E‑maily zachycené v bodech 1–2 dostanou štítek LABEL_NAME.
+E‑maily splňující bod 3 dostanou **vnořený** štítek "<PRVNI_LABEL>/VYHOVUJE"
+   (např. "3D CompaniesXXX/VYHOVUJE"), a to se zadanou barvou.
+----------------------------------------------------------------------
+"""
+
 # ─── Nastavení ──────────────────────────────────────────────────────────────
-SCOPES = ["https://mail.google.com/"]
+SCOPES        = ["https://mail.google.com/"]
 KEYWORDS_FILE = "keywords.txt"      # klíčová slova k vyhledání v textu/předmětu
-EMAILS_FILE   = "emails.txt"        # seznam e-mailových adres odesílatelů
+EMAILS_FILE   = "emails.txt"        # seznam e‑mailových adres odesílatelů
 LOG_FILE      = "log.txt"
 
-LABEL_NAME           = "3D CompaniesXXX"   # cílový štítek pro klíčová slova / odesílatele
-INTERSECTION_LABELS  = ["3D CompaniesXXX", "POZITIVNÍ ODPOVĚĎ"]  # nutný průnik existujících štítků
-VYHOVUJE_LABEL       = "VYHOVUJE"         # nový štítek, který přidáme, pokud e-mail splní průnik
+LABEL_NAME = "3D CompaniesXXX"          # rodičovský štítek pro body 1–2
+
+# Průnik štítků, které e‑mail MUSÍ současně mít, aby dostal pod‑štítek „VYHOVUJE“.
+# ⚠️ PRVNÍ položka = rodič pro vnořený VYHOVUJE štítek.
+INTERSECTION_LABELS = ["3D CompaniesXXX", f"{LABEL_NAME}/POZITIVNÍ ODPOVĚĎ"]
+
+# Gmail povoluje jen určitou paletu barev štítků → použijeme oficiální světle zelenou
+VYHOVUJE_COLOR = "#16A766"   # hezky zelená pro nový pod‑štítek
 
 # ─── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     filename=LOG_FILE,
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    encoding="utf-8"
+    encoding="utf-8",
 )
 
 # ─── Autentizace ────────────────────────────────────────────────────────────
 
 def gmail_authenticate(user_email: str):
-    """Vrátí přihlášenou službu Gmail API pro daný účet (token nezávislý na ostatních)."""
+    """Přihlásí se k Gmail API s tokenu v souboru token_<email>.json."""
     token_file = f"token_{user_email.replace('@', '_at_')}.json"
     creds = None
 
@@ -47,81 +65,108 @@ def gmail_authenticate(user_email: str):
         if not creds or not creds.valid:
             flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
             creds = flow.run_local_server(port=8081, prompt="consent")
-        with open(token_file, "w", encoding="utf-8") as token:
-            token.write(creds.to_json())
+        with open(token_file, "w", encoding="utf-8") as f:
+            f.write(creds.to_json())
 
     return build("gmail", "v1", credentials=creds)
 
 # ─── Štítky ─────────────────────────────────────────────────────────────────
 
-def get_or_create_label(service, label_name: str) -> str:
-    """Vrátí ID štítku; pokud neexistuje, vytvoří ho."""
-    labels_result = service.users().labels().list(userId="me").execute()
-    for label in labels_result.get("labels", []):
-        if label["name"].lower() == label_name.lower():
-            return label["id"]
-    label_obj = {
-        "name": label_name,
+def get_or_create_label(service, name: str, *, color_hex: str | None = None) -> str:
+    """Najde nebo vytvoří štítek (a zkusí nastavit barvu z povolené palety).
+
+    Pokud Gmail API barvu odmítne (400 invalidArgument), štítek se prostě vytvoří
+    bez barvy a skript pokračuje dál.
+    """
+    existing = service.users().labels().list(userId="me").execute().get("labels", [])
+    for lbl in existing:
+        if lbl["name"].lower() == name.lower():
+            label_id = lbl["id"]
+            # pokus o nastavení barvy (ignorujeme případné InvalidArgument)
+            if color_hex:
+                try:
+                    service.users().labels().update(
+                        userId="me",
+                        id=label_id,
+                        body={"color": {"backgroundColor": color_hex, "textColor": "#000000"}},
+                    ).execute()
+                except HttpError as e:
+                    if e.resp.status == 400:
+                        logging.info(f"API odmítlo barvu {color_hex} pro štítek '{name}', pokračuji bez ní.")
+            return label_id
+
+    body = {
+        "name": name,
         "labelListVisibility": "labelShow",
         "messageListVisibility": "show",
     }
-    created = service.users().labels().create(userId="me", body=label_obj).execute()
-    return created["id"]
+    # Vytvoříme BEZ barvy; případně ji zkusíme přidat 2. krokem (bez pádu skriptu)
+    created = service.users().labels().create(userId="me", body=body).execute()
+    label_id = created["id"]
+
+    if color_hex:
+        try:
+            service.users().labels().update(
+                userId="me",
+                id=label_id,
+                body={"color": {"backgroundColor": color_hex, "textColor": "#000000"}},
+            ).execute()
+        except HttpError as e:
+            if e.resp.status == 400:
+                logging.info(f"API odmítlo barvu {color_hex} pro štítek '{name}', pokračuji bez ní.")
+    return label_id
 
 
 def get_label_id_map(service) -> dict:
-    """Vrátí dict {název: id} pro všechny existující štítky."""
+    """Vrátí slovník {název: ID} pro všechny štítky."""
     labels = service.users().labels().list(userId="me").execute().get("labels", [])
     return {lbl["name"]: lbl["id"] for lbl in labels}
 
-# ─── Vyhledávání ────────────────────────────────────────────────────────────
+# ─── Pomocné funkce vyhledávání ────────────────────────────────────────────
 
-def load_list_from_file(filename: str):
-    if not os.path.exists(filename):
+def load_list_from_file(path: str):
+    if not os.path.exists(path):
         return []
-    with open(filename, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip()]
 
 
 def find_emails(service, query: str):
-    """Vyhledá zprávy podle Gmail search query (q=...)."""
     try:
         resp = service.users().messages().list(userId="me", q=query).execute()
         return resp.get("messages", [])
     except HttpError as e:
-        logging.warning(f"Chyba při hledání dotazu '{query}': {e}")
+        logging.warning(f"Chyba při hledání '{query}': {e}")
         return []
 
 
-def find_emails_by_labels(service, label_names: list):
-    """Najde zprávy, které mají **všechny** zadané štítky současně."""
+def find_emails_by_labels(service, names: list[str]):
     label_map = get_label_id_map(service)
-    label_ids = [label_map.get(name) for name in label_names if label_map.get(name)]
-    if len(label_ids) != len(label_names):
-        missing = ", ".join(set(label_names) - set(label_map))
+    ids = [label_map.get(n) for n in names if label_map.get(n)]
+    if len(ids) != len(names):
+        missing = ", ".join(set(names) - set(label_map))
         logging.warning(f"Nenalezeny štítky: {missing}")
         return []
     try:
-        resp = service.users().messages().list(userId="me", labelIds=label_ids).execute()
+        resp = service.users().messages().list(userId="me", labelIds=ids).execute()
         return resp.get("messages", [])
     except HttpError as e:
-        logging.warning(f"Chyba při hledání průniku štítků {label_names}: {e}")
+        logging.warning(f"Chyba při hledání průniku {names}: {e}")
         return []
 
-# ─── Označování ────────────────────────────────────────────────────────────
+# ─── Označování zpráv ──────────────────────────────────────────────────────
 
-def label_emails(service, label_id: str, messages: list):
-    """Přidá daný štítek ke všem zprávám v seznamu."""
-    count = 0
+def label_emails(service, label_id: str, messages: list) -> int:
+    cnt = 0
     for msg in messages:
         try:
-            msg_detail = service.users().messages().get(
+            md = service.users().messages().get(
                 userId="me",
                 id=msg["id"],
                 format="metadata",
                 metadataHeaders=["From", "Subject"],
             ).execute()
-            headers = msg_detail.get("payload", {}).get("headers", [])
+            headers = md.get("payload", {}).get("headers", [])
             subject = next((h["value"] for h in headers if h["name"] == "Subject"), "(Bez předmětu)")
             sender  = next((h["value"] for h in headers if h["name"] == "From"), "(Neznámý odesílatel)")
 
@@ -131,104 +176,83 @@ def label_emails(service, label_id: str, messages: list):
                 body={"addLabelIds": [label_id]},
             ).execute()
 
+            print(f"🏷️  Přidán štítek → {sender} | {subject}")
             logging.info(f"Označeno: {sender} | {subject}")
-            print(f"🏷️ Označeno: {sender} | {subject}")
-            count += 1
+            cnt += 1
         except HttpError as e:
-            logging.warning(f"Nelze označit zprávu {msg['id']}: {e}")
-    return count
+            logging.warning(f"Nelze označit {msg['id']}: {e}")
+    return cnt
 
-# ─── Hlavní logika pro jeden účet ──────────────────────────────────────────
+# ─── Hlavní workflow pro účet ──────────────────────────────────────────────
 
 def label_matching_emails(user_email: str):
-    logging.info(f"Spuštěno označování e-mailů pro: {user_email}")
-    print(f"🔁 Spuštěno označování e-mailů pro: {user_email}")
+    print(f"\n===== Účet: {user_email} =====")
+    service = gmail_authenticate(user_email)
 
-    service           = gmail_authenticate(user_email)
-    companies_labelid = get_or_create_label(service, LABEL_NAME)
-    vyhovuje_labelid  = get_or_create_label(service, VYHOVUJE_LABEL)
+    # a) připrav štítky
+    companies_id = get_or_create_label(service, LABEL_NAME)
+    vyhovuje_path = f"{INTERSECTION_LABELS[0]}/VYHOVUJE"
+    vyhovuje_id  = get_or_create_label(service, vyhovuje_path, color_hex=VYHOVUJE_COLOR)
+    print(f"Štítek pro klíčová slova / adresy: {LABEL_NAME} (ID {companies_id})")
+    print(f"Štítek pro průnik:             {vyhovuje_path} (ID {vyhovuje_id})")
 
-    keywords = load_list_from_file(KEYWORDS_FILE)
-    senders  = load_list_from_file(EMAILS_FILE)
-    total    = 0
+    total = 0
 
-    # 1) Klíčová slova ------------------------------------------------------
-    for keyword in keywords:
-        print(f"🔍 Hledám zprávy s klíčovým slovem: '{keyword}'")
-        logging.info(f"Hledám zprávy s klíčovým slovem: '{keyword}'")
-        messages = find_emails(service, keyword)
-        total   += label_emails(service, companies_labelid, messages)
-        print()
+    # b) klíčová slova
+    for kw in load_list_from_file(KEYWORDS_FILE):
+        print(f"🔍 Klíčové slovo: '{kw}'")
+        msgs = find_emails(service, kw)
+        total += label_emails(service, companies_id, msgs)
 
-    # 2) Odesílatelé --------------------------------------------------------
-    for sender in senders:
+    # c) odesílatelé
+    for sender in load_list_from_file(EMAILS_FILE):
         query = f"from:{sender}"
-        print(f"🔍 Hledám zprávy od: '{sender}'")
-        logging.info(f"Hledám zprávy od: '{sender}'")
-        messages = find_emails(service, query)
-        total   += label_emails(service, companies_labelid, messages)
-        print()
+        print(f"🔍 Odesílatel: {sender}")
+        msgs = find_emails(service, query)
+        total += label_emails(service, companies_id, msgs)
 
-    # 3) Průnik štítků (CIHLA ∩ POZITIVNÍ ODPOVĚĎ) -------------------------
-    if INTERSECTION_LABELS:
-        print(f"🔍 Kontroluji průnik štítků: {', '.join(INTERSECTION_LABELS)}")
-        logging.info(f"Kontroluji průnik štítků: {INTERSECTION_LABELS}")
-        messages = find_emails_by_labels(service, INTERSECTION_LABELS)
-        total   += label_emails(service, vyhovuje_labelid, messages)
-        print()
+    # d) průnik štítků
+    print(f"🔍 Průnik štítků: {', '.join(INTERSECTION_LABELS)}")
+    msgs = find_emails_by_labels(service, INTERSECTION_LABELS)
+    total += label_emails(service, vyhovuje_id, msgs)
 
-    print(f"✅ Celkem označeno {total} zpráv pro {user_email}. Podrobnosti v {LOG_FILE}\n")
-    logging.info(f"Celkem označeno zpráv: {total} pro {user_email}\n")
+    print(f"✅ Hotovo – přidáno {total} štítků.\n")
+    logging.info(f"Celkem přidáno {total} štítků pro {user_email}\n")
 
 # ─── Scheduler ─────────────────────────────────────────────────────────────
 
-def run_scheduler(user_email: str, interval_minutes: int = 60):
-    schedule.every(interval_minutes).minutes.do(lambda: label_matching_emails(user_email))
-    print(f"⏱️ Automatické označování pro {user_email} spuštěno každých {interval_minutes} minut.")
+def run_scheduler(user_email: str, every_minutes: int = 60):
+    schedule.every(every_minutes).minutes.do(lambda: label_matching_emails(user_email))
+    print(f"⏱️  Scheduler běží – každých {every_minutes} min pro {user_email}…")
     while True:
         schedule.run_pending()
         time.sleep(1)
 
-# ─── Spuštění ze CLI ───────────────────────────────────────────────────────
+# ─── CLI rozhraní ──────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    token_files = [f for f in os.listdir() if f.startswith("token_") and f.endswith(".json")]
-    available    = [f.replace("token_", "").replace("_at_", "@").replace(".json", "") for f in token_files]
+    tokens = [f for f in os.listdir() if f.startswith("token_") and f.endswith(".json")]
+    accounts = [f.replace("token_", "").replace("_at_", "@").replace(".json", "") for f in tokens]
 
-    if not available:
-        print("❌ Nenašly se žádné tokeny. Spusť nejprve skript pro přihlášení účtu.")
+    if not accounts:
+        print("❌ Nenalezen žádný token. Spusť nejprve přihlášení účtu.")
         exit(1)
 
     print("Dostupné účty:")
-    for i, mail in enumerate(available, 1):
-        print(f"{i}: {mail}")
-    print("0: Všechny účty")
+    for i, mail in enumerate(accounts, 1):
+        print(f" {i}: {mail}")
+    print(" 0: Všechny účty")
 
-    sel = input("Vyber účet (číslo): ").strip()
+    choice = input("Vyber účet (číslo): ").strip()
+    selected = accounts if choice == "0" else [accounts[int(choice) - 1]]
 
-    if sel == "0":
-        selected = available
-    else:
-        try:
-            selected = [available[int(sel) - 1]]
-        except (ValueError, IndexError):
-            print("❌ Neplatný výběr.")
-            exit(1)
-
-    print("Zadej režim:")
-    print("1 – Spustit ručně")
-    print("2 – Spouštět automaticky každých X minut")
-    mode = input("Výběr (1/2): ").strip()
+    mode = input("Režim – 1: ručně, 2: opakovaně: ").strip()
 
     if mode == "1":
         for mail in selected:
             label_matching_emails(mail)
     elif mode == "2":
-        mins = input("Zadej interval v minutách (např. 60): ").strip()
-        try:
-            interval = int(mins)
-            for mail in selected:
-                run_scheduler(mail, interval)
-        except ValueError:
-            print("❌ Neplatný interval.")
+        mins = int(input("Interval (minuty): ").strip())
+        for mail in selected:
+            run_scheduler(mail, mins)
     else:
         print("❌ Neplatný výběr.")
