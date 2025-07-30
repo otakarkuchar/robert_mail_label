@@ -1,15 +1,6 @@
 """labeler_app.py
 ----------------------------------------------------------------------
-Orchestruje vše kolem označování a přeposílání e-mailů.
-
-* LabelerApp.run_once()   – jedno spuštění (CLI, GUI tlačítko „RUN“)
-* LabelerApp.schedule(n)  – periodické spouštění v minutách (daemon)
-
-Závislosti:
-    gmail_client.GmailClient
-    label_manager.LabelManager
-    message_filter.MessageFilter
-    forwarder.Forwarder        (volitelně – jen pokud je nastaven forward_to)
+Orchestruje označování a přeposílání e-mailů (detailní výpis + logy).
 ----------------------------------------------------------------------"""
 
 from __future__ import annotations
@@ -34,7 +25,8 @@ class AppConfig:
     vyhovuje_color: str = "#16a766"
     keywords_file: str = "keywords.txt"
     emails_file: str = "emails.txt"
-    forward_to: str | None = None                 # None = neforwardovat
+    forward_to: str | None = None
+    log_file: str = "log.txt"              # <─ NEW
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -54,14 +46,24 @@ class LabelerApp:
     """Vysokoúrovňová logika pro jeden Gmail účet."""
 
     def __init__(self, gmail: GmailClient, config: AppConfig):
+        # základ
         self.gmail   = gmail
         self.config  = config
 
+        # logging – když už je někde jinde nastaven, necháme ho být
+        if not logging.getLogger().hasHandlers():
+            logging.basicConfig(
+                filename=config.log_file,
+                level=logging.INFO,
+                format="%(asctime)s - %(levelname)s - %(message)s",
+                encoding="utf-8",
+            )
+
+        # pomocné objekty
         self.labels  = LabelManager(gmail)
         self.filters = MessageFilter(
             gmail, self.labels, intersection_labels=config.intersection_labels
         )
-
         self.forwarder = (
             Forwarder(gmail, forward_to=config.forward_to) if config.forward_to else None
         )
@@ -70,29 +72,51 @@ class LabelerApp:
     # Jednorázové spuštění
     # ------------------------------------------------------------------
     def run_once(self):
-        print(f"\n=== {self.gmail.user_email} ===")
+        acct = self.gmail.user_email
+        logging.info("=== Spouštím run_once pro účet %s ===", acct)
+        print(f"\n=== {acct} ===")
 
         # a) zajisti štítky
         main_id = self.labels.get_or_create(self.config.main_label)
         vyh_path = f"{self.config.main_label}/VYHOVUJE"
         vyh_id = self.labels.get_or_create(vyh_path, color_hex=self.config.vyhovuje_color)
 
+        total_kw = total_sender = total_inter = 0
+
         # b) klíčová slova
-        for msg in self.filters.matching_keywords(_load_list(self.config.keywords_file)):
-            self.gmail.modify_labels(msg["id"], add=[main_id])
+        for kw in _load_list(self.config.keywords_file):
+            kw_msgs = self.filters.matching_keywords([kw])
+            logging.info("Klíčové slovo '%s' → %d zpráv", kw, len(kw_msgs))
+            print(f"🔍 Klíčové slovo '{kw}': {len(kw_msgs)} nalezeno")
+            for m in kw_msgs:
+                self.gmail.modify_labels(m["id"], add=[main_id])
+            total_kw += len(kw_msgs)
 
         # c) odesílatelé
-        for msg in self.filters.matching_senders(_load_list(self.config.emails_file)):
-            self.gmail.modify_labels(msg["id"], add=[main_id])
+        for sender in _load_list(self.config.emails_file):
+            snd_msgs = self.filters.matching_senders([sender])
+            logging.info("Odesílatel '%s' → %d zpráv", sender, len(snd_msgs))
+            print(f"🔍 Odesílatel '{sender}': {len(snd_msgs)} nalezeno")
+            for m in snd_msgs:
+                self.gmail.modify_labels(m["id"], add=[main_id])
+            total_sender += len(snd_msgs)
 
         # d) průnik štítků
         inter_msgs = self.filters.matching_intersection()
+        logging.info("Průnik štítků %s → %d zpráv", self.config.intersection_labels, len(inter_msgs))
+        print(f"🔍 Průnik štítků: {len(inter_msgs)} nalezeno")
         for m in inter_msgs:
             self.gmail.modify_labels(m["id"], add=[vyh_id])
             if self.forwarder:
                 self.forwarder.forward(m["id"], vyh_path)
+        total_inter = len(inter_msgs)
 
-        print(f"✅ Přidáno {len(inter_msgs)} × '{vyh_path}' (průnik)")
+        total_all = total_kw + total_sender + total_inter
+        logging.info(
+            "Souhrn %s – KW:%d  FROM:%d  VYH:%d  → CELKEM:%d",
+            acct, total_kw, total_sender, total_inter, total_all
+        )
+        print(f"✅ Hotovo – přidáno {total_kw}×KW, {total_sender}×FROM, {total_inter}×VYHOVUJE  ⇒  {total_all} celkem")
 
     # ------------------------------------------------------------------
     # Scheduler (blokuje vlákno)
