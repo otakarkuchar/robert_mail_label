@@ -1,78 +1,132 @@
 """
-llm_classifier_simple.py
-──────────────────────────────────────────────────────────
-E-mail reply → "positive" / "neutral" / "negative"
-Používá přímo Ollama (mistral).  Žádný OPENAI_API_KEY není potřeba.
+llm_classifier.py  –  mini-verze + volitelná CrewAI obálka
 """
 
 from __future__ import annotations
 from typing import Literal
 import os, re
-import litellm                           # pip install litellm
+import litellm                    # pip install litellm
+# CrewAI je volitelný – pokud ji nemáš, stačí část SimpleClassifier
+try:
+    from crewai import Agent, Task, Crew, Process
+    CREWAI_AVAILABLE = True
+except ImportError:
+    CREWAI_AVAILABLE = False
 
-# ─── 1. Konfigurace Ollamy ──────────────────────────────────────────────
-MODEL       = "ollama/mistral:latest"    # můžeš změnit na deepseek-r1 ap.
-OLLAMA_URL  = "http://localhost:11434"   # změň, pokud máš jiný port/host
-
+# ─── Ollama konfig ───────────────────────────────────────────────────────
+MODEL       = "ollama/mistral:latest"
+OLLAMA_URL  = "http://localhost:11434"
 os.environ.setdefault("OLLAMA_BASE_URL", OLLAMA_URL)
 
-PROMPT_TMPL = (
+PROMPT = (
     'email response: "{reply}"\n'
-    "decide response email. "
-    "if it is positive - they have stuffs or they can make work for me, select positive answer (1)\n"
-    "if it is negative - they don't have stuffs or they can't make work for me, select negative answer (-1)\n"
-    "if it is neutral - they offer me something else similar to my product -> select neutral answer (0)"
+    "Decide:\n"
+    "  1  → positive  (they can supply / can do the job)\n"
+    "  0  → neutral   (can’t supply exact item, but offer alternative)\n"
+    " -1 → negative  (they cannot supply / cannot do the job)\n\n"
+    "Return the answer **exactly in this form**:\n"
+    "<ANSWER>1</ANSWER>  or  <ANSWER>0</ANSWER>  or  <ANSWER>-1</ANSWER>"
 )
 
-LABEL_MAP = {1: "positive", 0: "neutral", -1: "negative"}
+LABEL = {1: "positive", 0: "neutral", -1: "negative"}
 
-
-# ─── 2. Funkce volající Ollamu ──────────────────────────────────────────
+# ─── Lehká funkce bez CrewAI ─────────────────────────────────────────────
 def _ask_ollama(reply: str) -> str:
-    messages = [{"role": "user", "content": PROMPT_TMPL.format(reply=reply)}]
+    messages = [{"role": "user", "content": PROMPT.format(reply=reply)}]
     resp = litellm.completion(model=MODEL, messages=messages, temperature=0)
     return resp["choices"][0]["message"]["content"].strip()
 
 
 def _extract_int(text: str) -> int:
+    # nejdřív zkuste <ANSWER>…</ANSWER>
+    tag = re.search(r"<ANSWER>\s*(-?1|0)\s*</ANSWER>", text, re.I)
+    if tag:
+        return int(tag.group(1))
+    # fallback: první –1|0|1
     m = re.search(r"-?1|0", text)
-    if not m:
-        raise ValueError(f"LLM nevrátil 1/0/-1 → {text!r}")
-    return int(m.group())
+    if m:
+        return int(m.group())
+    raise ValueError(f"LLM nevrátil 1/0/-1 → {text!r}")
 
 
-# ─── 3. Veřejná funkce ---------------------------------------------------
 def classify_email(reply: str) -> Literal["positive", "neutral", "negative"]:
-    answer = _ask_ollama(reply)
-    value  = _extract_int(answer)
-    return LABEL_MAP[value]
+    raw   = _ask_ollama(reply)
+    value = _extract_int(raw)
+
+    # heuristika pro alternativu
+    if value == 1 and re.search(r"\b(similar|alternative|instead)\b", reply, re.I):
+        value = 0
+
+    return LABEL[value]
 
 
-# ─── 4. Demo -------------------------------------------------------------
+# ─── Volitelná CrewAI obálka (stejný prompt) ────────────────────────────
+if CREWAI_AVAILABLE:
+    _agent = Agent(
+        role            = "Reply Classifier",
+        goal            = "Output exactly -1, 0 or 1 in <ANSWER> tag.",
+        backstory       = "Understands supplier replies.",
+        system_prompt   = PROMPT,
+        llm             = MODEL,
+        tools           = [], verbose=False, memory=False, allow_delegation=False,
+    )
+
+    def classify_email_crewai(reply: str) -> str:
+        task = Task(
+            description     = PROMPT.format(reply=reply),
+            expected_output = "<ANSWER>-1/0/1</ANSWER>",
+            agent           = _agent,
+        )
+        crew = Crew(
+            agents=[_agent],
+            tasks=[task],
+            process=Process.sequential,
+            manager_llm=MODEL,
+        )
+
+        result = crew.kickoff()
+        # CrewOutput compatibility
+        answer = (
+            result.final_output if hasattr(result, "final_output")
+            else result.output   if hasattr(result, "output")
+            else str(result)
+        )
+        value = _extract_int(answer)
+        return LABEL[value]
+
+# ─── Demo ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    samples = [
+    test = [
         ("Hi, yes – we keep 500 pcs on stock and can ship tomorrow.",  "positive"),
         ("We don’t have X, but Y is similar and available.",           "neutral"),
-        ("Hi, no – I can’t help you with constructions, it’s not my field.", "negative"),
+        ("Hi, no – I can’t help you with constructions.",              "negative"),
         ("I’m not sure, but I think we can do it.",                    "neutral"),
         ("We have no stock, sorry.",                                   "negative"),
-        ("Yes, we can do it, but it will take 2 weeks.",               "positive"),
-        ("No, we don’t have that product.",                            "negative"),
-        ("I’m not sure if we can help with that.",                     "neutral"),
-        ("Yes, we can provide that service.",                          "positive"),
-        ("Unfortunately, we cannot assist with that request.",         "negative"),
-        ("We can offer you a similar product instead.",               "neutral"),
-        ("Yes, we have it in stock and can ship it today.",            "positive"),
-        ("No, we don’t have that in our inventory.",                   "negative"),
-        ("I’m afraid we cannot fulfill that order at this time.",     "negative"),
-        ("Yes, we can help you with that request.",                    "positive"),
-        ("We have a similar product available if you are interested.", "neutral"),
-        ("Unfortunately, we cannot provide that service right now.",   "negative"),
-        ("Yes, we can deliver it by the end of the week.",             "positive"),
-        ("No, we don’t have that item in stock currently.",            "negative"),
-        ("We can assist you with that, but it will take some time.",   "neutral"),
+        ("We can supply 100 pcs, but not before next month.",         "neutral"),
+        ("Yes, we can do it, but only in 2 weeks.",                    "positive"),
+        ("No, we cannot supply this item.",                            "negative"),
+        ("We have 100 pcs available, but they are not on stock.",     "neutral"),
+        ("Yes, we can supply 500 pcs immediately.",                    "positive"),
+        ("Unfortunately, we cannot help you with this request.",       "negative"),
+        ("We can supply 100 pcs, but not before next month.",         "neutral"),
+        ("Yes, we can do it, but only in 2 weeks.",                    "positive"),
+        ("No, we cannot supply this item.",                            "negative"),
+        ("We have 100 pcs available, but they are not on stock.",     "neutral"),
+        ("Yes, we can supply 500 pcs immediately.",                    "positive"),
+        ("Unfortunately, we cannot help you with this request.",       "negative"),
+        ("We can supply 100 pcs, but not before next month.",         "neutral"),
+        ("Yes, we can do it, but only in 2 weeks.",                    "positive"),
+        ("No, we cannot supply this item.",                            "negative"),
+        ("We have 100 pcs available, but they are not on stock.",     "neutral"),
+        ("Yes, we can supply 500 pcs immediately.",                    "positive"),
     ]
 
-    for s, expected in samples:
-        pred = classify_email(s)
-        print(f"{s[:45]:<45} → {pred}   (should be {expected})")
+    print("— Simple (direct litellm) —")
+    for txt, exp in test:
+        print(f"{txt[:45]:<45} → {classify_email(txt)}   (exp {exp})")
+
+    if CREWAI_AVAILABLE:
+        print("\n— CrewAI wrapper —")
+        for txt, exp in test:
+            print(f"{txt[:45]:<45} → {classify_email_crewai(txt)}   (exp {exp})")
+
