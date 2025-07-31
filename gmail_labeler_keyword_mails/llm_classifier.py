@@ -1,33 +1,33 @@
 """
-llm_classifier.py  –  CrewAI-based e-mail reply classifier
-───────────────────────────────────────────────────────────
-• Vrací řetězec "positive" / "negative" / "neutral"
-• Agent vypíše jediný řádek  <SCORE>0.75</SCORE>
-• Výchozí model:  ollama/mistral:latest  (lokální server na 11434)
+llm_classifier.py  – CrewAI-based e-mail reply classifier
+──────────────────────────────────────────────────────────
+• Vrací "positive" / "negative" / "neutral"
+• Agent vypisuje jediný řádek  <SCORE>±1.0</SCORE>
+• Výchozí model běží přes Ollama  (mistral:latest)
 """
 
 from __future__ import annotations
-from typing import Literal
+from typing import Literal, Optional
 import os, re
 from crewai import Agent, Task, Crew, Process
 
-# ╭─ 1. Globální nastavení modelu a adresy Ollama ────────────────────────╮
-DEFAULT_MODEL  = "ollama/mistral:latest"
-OLLAMA_URL     = "http://localhost:11434"
+# ╭─ 1. Globální nastavení Ollamy ───────────────────────────────────────╮
+DEFAULT_MODEL = "ollama/mistral:latest"
+OLLAMA_URL    = "http://localhost:11434"
 
-os.environ.setdefault("CREWAI_MODEL_NAME",    DEFAULT_MODEL)   # pro agenty
-os.environ.setdefault("CREWAI_MANAGER_MODEL", DEFAULT_MODEL)   # pro orchestrátor
-os.environ.setdefault("OLLAMA_BASE_URL",      OLLAMA_URL)      # kam se připojit
-# ╰────────────────────────────────────────────────────────────────────────╯
+os.environ.setdefault("CREWAI_MODEL_NAME",    DEFAULT_MODEL)
+os.environ.setdefault("CREWAI_MANAGER_MODEL", DEFAULT_MODEL)
+os.environ.setdefault("OLLAMA_BASE_URL",      OLLAMA_URL)
+# ╰───────────────────────────────────────────────────────────────────────╯
 
-# ╭─ 2. Prompt a definice agenta ─────────────────────────────────────────╮
+# ╭─ 2. Prompt & agent ──────────────────────────────────────────────────╮
 SYSTEM_PROMPT = (
     "ROLE\n"
     "  You are an advanced B2B e-mail reply classifier.\n\n"
     "OBJECTIVE\n"
     "  Decide whether the supplier’s reply is POSITIVE, NEGATIVE or NEUTRAL.\n\n"
     "SCORING\n"
-    "  Output exactly one decimal score in the range −1.0 … 1.0:\n"
+    "  Output exactly one decimal score (−1.0 … 1.0):\n"
     "    1.0 → clearly positive   •   0.0 → neutral   •   −1.0 → clearly negative\n\n"
     "EXAMPLES\n"
     "  Request: We need 500 bricks by Friday.\n"
@@ -42,76 +42,81 @@ SYSTEM_PROMPT = (
     "FORMAT\n"
     "  One line only:\n"
     "      <SCORE>number</SCORE>\n"
-    "  No other text."
+    "  No explanation."
 )
 
 classifier_agent = Agent(
     role    = "E-mail Reply Classifier",
     goal    = "Return only the numeric sentiment score.",
-    backstory = (
-        "You specialise in classifying supplier replies for purchasing "
-        "and understand both English and Mandarin correspondence."
-    ),
-    system_prompt    = SYSTEM_PROMPT,
-    llm              = DEFAULT_MODEL,   # ← klíčové: vždy Ollama model
-    tools            = [],
+    backstory =
+        "You specialise in evaluating supplier replies for purchase requests "
+        "and understand both English and Mandarin correspondence.",
+    system_prompt = SYSTEM_PROMPT,
+    llm           = DEFAULT_MODEL,      # ← Ollama model
+    tools         = [],
     allow_delegation = False,
-    verbose          = False,
-    memory           = False,
+    verbose       = False,
+    memory        = False,
 )
 
-TASK_TEMPLATE = """Below is the supplier's reply.
+TASK_TEMPLATE = """
+REQUEST
+-------
+{request}
 
-<<<EMAIL>>
-{email_body}
-<<<END>>
+REPLY
+-----
+{reply}
 
-Classify and output <SCORE>…</SCORE> only.
+Classify the reply and output <SCORE>…</SCORE> only.
 """
 
-# ╭─ 3. Veřejná obálka pro zbytek aplikace ───────────────────────────────╮
+# ╭─ 3. Veřejná třída ───────────────────────────────────────────────────╮
 class LLMClassifier:
-    def __init__(self, neutrality: float = 0.20, *, crew_model: str | None = None):
+    def __init__(self,
+                 neutrality: float = 0.20,
+                 *,
+                 crew_model: str | None = None):
         """
-        neutrality  – šířka zóny kolem 0.0, např. 0.20 ⇒ (−0.20 … +0.20) = 'neutral'
-        crew_model  – např. 'ollama/deepseek-r1' pro přepnutí modelu z profilu
+        neutrality …  ± zóna pro 'neutral' (0.05 = přísnější)
+        crew_model …  např. 'ollama/deepseek-r1' – přepíše výchozí model
         """
         if crew_model:
             os.environ["CREWAI_MODEL_NAME"]    = crew_model
             os.environ["CREWAI_MANAGER_MODEL"] = crew_model
-            classifier_agent.llm = crew_model      # aktualizuj existujícího agenta
+            classifier_agent.llm = crew_model
         self.neutrality = float(neutrality)
 
-    # ──────────────────────────────────────────────────────────────
-    def predict(self, email_text: str) -> Literal["positive", "negative", "neutral"]:
-        """Klasifikuje text a vrátí 'positive' / 'negative' / 'neutral'."""
+    # ------------------------------------------------------------------
+    def predict(self,
+                reply: str,
+                *,
+                request: str = "The customer asked for a specific product/service."):
+        """Klasifikuje odpověď; vrátí 'positive' / 'negative' / 'neutral'."""
         task = Task(
-            description=TASK_TEMPLATE.format(
-                request=self.current_request,  # ← uložíš při zpracování vlákna
-                email_body=email_text
-            ),
-            expected_output="<SCORE>NUMBER</SCORE>",
-            agent=classifier_agent
+            description = TASK_TEMPLATE.format(request=request, reply=reply),
+            expected_output = "<SCORE>NUMBER</SCORE>",
+            agent = classifier_agent,
         )
 
         crew = Crew(
-            agents   = [classifier_agent],
-            tasks    = [task],
-            process  = Process.sequential,
-            manager_llm = os.environ["CREWAI_MANAGER_MODEL"],
+            agents       = [classifier_agent],
+            tasks        = [task],
+            process      = Process.sequential,
+            manager_llm  = os.environ["CREWAI_MANAGER_MODEL"],
         )
 
-        result = crew.kickoff()               # CrewOutput nebo dict/str
+        result = crew.kickoff()  # CrewOutput | str | dict
 
-        # kompatibilně vytáhni samotný text
+        # ── vytáhni textový výstup z různých typů −−
         if isinstance(result, str):
             answer = result
-        elif hasattr(result, "output"):
-            answer = result.output
         elif hasattr(result, "final_output"):
             answer = result.final_output
+        elif hasattr(result, "output"):
+            answer = result.output
         elif isinstance(result, dict):
-            answer = result.get("final_output", next(iter(result.values())))
+            answer = result.get("final_output") or next(iter(result.values()))
         else:
             answer = str(result)
 
@@ -121,37 +126,22 @@ class LLMClassifier:
         if score < -self.neutrality:  return "negative"
         return "neutral"
 
-        if score >  self.neutrality:
-            return "positive"
-        if score < -self.neutrality:
-            return "negative"
-        return "neutral"
-
-    # ──────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
     @staticmethod
     def _score_from(text: str) -> float:
-        """Vytáhne první reálné číslo (ořízne na −1.0 … 1.0)."""
         m = re.search(r"-?\d+(?:\.\d+)?", text)
         if not m:
             raise ValueError(f"No numeric <SCORE> found in answer: {text!r}")
         return max(-1.0, min(1.0, float(m.group())))
 
-# ╭─ 4. Spustitelné demo ─────────────────────────────────────────────────╮
+# ╭─ 4. Demo (spustitelné) ───────────────────────────────────────────────╮
 if __name__ == "__main__":
-    demo = (
-        "Hi, yes – we keep 500 pcs on stock and can ship tomorrow.\n"
-        "Please confirm quantity and shipping address."
-    )
+    NEG = "Hi, no – I can’t help you with constructions, it’s not my field."
+    POS = "Hi, yes – we keep 500 pcs on stock and can ship tomorrow."
+    NEU = "We don’t have X, but Y is similar and available."
 
-    # demo = (
-    #     "Hi, no i cant help you with constructions, but i am free 20 weeks from today, is it ok?"
-    # )
+    cls = LLMClassifier(neutrality=0.05)   # užší neutrální zóna
 
-    demo = (
-        "Hi, no i cant help you with constructions, its not my field."
-    )
-
-    # cls = LLMClassifier()
-    cls = LLMClassifier(neutrality=0.05)
-
-    print("Predicted sentiment →", cls.predict(demo))
+    print("NEG →", cls.predict(NEG, request="Can you do construction work?"))
+    print("POS →", cls.predict(POS, request="Can you supply 500 pcs by Friday?"))
+    print("NEU →", cls.predict(NEU, request="Do you stock ABS white filament?"))
