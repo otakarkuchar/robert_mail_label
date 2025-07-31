@@ -1,10 +1,3 @@
-"""
-llm_classifier.py  –  B2B-reply sentiment (Ollama / Mistral)
-─────────────────────────────────────────────────────────────
-• Vrací "positive" / "neutral" / "negative"
-• Volitelně: simple-mód (přímé volání Litellm) a CrewAI-wrapper.
-"""
-
 from __future__ import annotations
 from typing import Literal
 import os, re, litellm
@@ -99,26 +92,47 @@ if CREW:
         tools=[], verbose=False, memory=False, allow_delegation=False,
     )
 
-    def classify_email_crewai(reply: str) -> str:
-        task = Task(
-            description     = PROMPT.format(reply=reply),
-            expected_output = "<ANSWER>-1/0/1</ANSWER>",
-            agent           = _agent,
-        )
-        crew = Crew(
-            agents      = [_agent],
-            tasks       = [task],
-            process     = Process.sequential,
-            manager_llm = MODEL,
-        )
-        result = crew.kickoff()
-        answer = (
-            getattr(result, "final_output", None)
-            or getattr(result, "output", None)
-            or str(result)
-        )
-        value = _normalize(_extract_int(answer), reply)
-        return LABEL[value]
+    def classify_email_crewai(reply: str, max_retries: int = 2) -> str:
+        """Classify email using CrewAI.
+
+        If the first attempt does not return an integer tag (-1/0/1), the task
+        is automatically re‑run up to *max_retries* additional times.  After
+        all attempts are exhausted a ``ValueError`` is raised and propagated
+        to the caller so that the caller can decide how to handle it.
+        """
+        attempts = 0
+        last_error: ValueError | None = None
+
+        while attempts <= max_retries:
+            task = Task(
+                description     = PROMPT.format(reply=reply),
+                expected_output = "<ANSWER>-1/0/1</ANSWER>",
+                agent           = _agent,
+            )
+            crew = Crew(
+                agents      = [_agent],
+                tasks       = [task],
+                process     = Process.sequential,
+                manager_llm = MODEL,
+            )
+
+            result = crew.kickoff()
+            answer = (
+                getattr(result, "final_output", None)
+                or getattr(result, "output", None)
+                or str(result)
+            )
+
+            try:
+                value = _normalize(_extract_int(answer), reply)
+                return LABEL[value]
+            except ValueError as exc:
+                # Nepodařilo se najít -1/0/1 → zkusíme znovu
+                last_error = exc
+                attempts += 1
+                if attempts > max_retries:
+                    # Výjimku předáme dál až po vyčerpání všech pokusů
+                    raise last_error
 # ╰───────────────────────────────────────────────────────────────────────╯
 
 
@@ -146,6 +160,10 @@ if __name__ == "__main__":
     if CREW:
         print("\n— CrewAI —")
         for txt, exp in tests:
-            print(f"{txt[:48]:<48} → {classify_email_crewai(txt)}   (exp {exp})")
+            try:
+                print(f"{txt[:48]:<48} → {classify_email_crewai(txt)}   (exp {exp})")
+            except ValueError as exc:
+                print(f"{txt[:48]:<48} → CHYBA: {exc}")
     time_end = time.time()
     print(f"Time: {time_end - time_start:.2f} seconds")
+# ╰───────────────────────────────────────────────────────────────────────╯
