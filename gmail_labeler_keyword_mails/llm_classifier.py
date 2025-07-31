@@ -1,14 +1,15 @@
 from __future__ import annotations
 from typing import Literal, List
 import os, re, unicodedata, statistics, litellm
+import math
 
 """
-llm_classifier.py  –  B2B-reply sentiment (Ollama / Mistral)
+llm_classifier.py  –  B2B‑reply sentiment (Ollama / Mistral)
 ──────────────────────────────────────────────────────────────
 Varianty klasifikace
 ────────────────────
 • SIMPLE   → 1× volání LLM + heuristika (rychlé)
-• CREWAI   → CrewAI wrapper (1× volání LLM; auto-retry)
+• CREWAI   → CrewAI wrapper (1× volání LLM; auto‑retry)
 • HIGHEND  → Ensemble n×LLM (majoritní hlasování) + heuristika
 
 Konfigurace
@@ -21,8 +22,10 @@ Konfigurace
     export LEAD_LIMIT_DAYS=14   # default 14
   nebo parametr `classify_email(..., lead_limit_days=10)`
 
-‐ Pokud LLM oznámí dodání „in 2 weeks“ a limit je 14 dní → stále **positive**.
-‐ Pokud hlásí „next month“ nebo > limit dnů → **neutral**.
+– Číselné vyjádření zpoždění (např. *in 2 weeks*, *in 10 days*) se porovnává
+  s limitem; hodnoty > limit ⇒ **neutral**.
+– Desetinné časy (*in 4.5 weeks*) jsou podporovány a zaokrouhlují se nahoru.
+– Vágní výrazy („next month“, „not before …“) → vždy **neutral**.
 """
 
 # ╭─ 0. Konfigurace prostředí ─────────────────────────────────────────╮
@@ -48,10 +51,11 @@ LABEL = {1: "positive", 0: "neutral", -1: "negative"}
 
 UNCERTAIN_PAT   = r"\b(i[’']?m not sure|maybe|perhaps|depends|uncertain|nejsem si jist|možná)\b"
 ALTERNATIVE_PAT = r"\b(similar|alternative|instead|other product|jiný výrobek|náhrada)\b"
-DELAY_PAT       = r"\b(not before|no earlier than|next month|next year|in \d+ (day|week|month|year)s?)\b"
+DELAY_PAT       = r"\b(not before|no earlier than|next month|next year|in \d+(?:\.\d+)? (day|week|month|year)s?)\b"
 NEGATIVE_PAT    = r"\b(no stock|out of stock|no capacity|cannot|can[’']?t|nemůžeme|neskladem|bez kapacity)\b"
 
-DELAY_EXTRACT = re.compile(r"in\s+(\d+)\s+(day|week|month|year)s?", re.I)
+# podporuje i desetinné číslo
+DELAY_EXTRACT = re.compile(r"in\s+(\d+(?:\.\d+)?)\s+(day|week|month|year)s?", re.I)
 # ╰─────────────────────────────────────────────────────────────────────╯
 
 
@@ -74,19 +78,14 @@ def _extract_int(text: str) -> int:
 
 
 def _parse_delay_days(text_lc: str) -> int | None:
+    """Vrátí zpoždění zaokrouhlené nahoru na celé dny."""
     m = DELAY_EXTRACT.search(text_lc)
     if not m:
         return None
-    qty, unit = int(m.group(1)), m.group(2).lower()
-    if unit.startswith("day"):
-        return qty
-    if unit.startswith("week"):
-        return qty * 7
-    if unit.startswith("month"):
-        return qty * 30
-    if unit.startswith("year"):
-        return qty * 365
-    return None
+    qty = float(m.group(1).replace(',', '.'))
+    unit = m.group(2).lower()
+    factor = 1 if unit.startswith("day") else 7 if unit.startswith("week") else 30 if unit.startswith("month") else 365
+    return math.ceil(qty * factor)
 
 
 def _normalize(value: int, reply: str, limit_days: int) -> int:
@@ -174,7 +173,7 @@ else:
 # ╰─────────────────────────────────────────────────────────────────────╯
 
 
-# ╭─ 5. HIGH-END varianta (ensemble) ───────────────────────────────────╮
+# ╭─ 5. HIGH‑END varianta (ensemble) ──────────────────────────────────╮
 
 def _majority_vote(values: List[int]) -> int:
     try:
@@ -220,6 +219,7 @@ def classify_email(
 # ╰─────────────────────────────────────────────────────────────────────╯
 
 
+
 # ╭─ 7. Demo ───────────────────────────────────────────────────────────╮
 if __name__ == "__main__":
     tests = [
@@ -240,15 +240,19 @@ if __name__ == "__main__":
     ]
 
     import time
-
     for mode in ("simple", "crewai", "highend"):
+        score = 0
         print(f"— {mode.upper()} —")
         start = time.time()
         for txt, expected in tests:
             try:
                 result = classify_email(txt, mode=mode, lead_limit_days=14)
                 print(f"{txt[:48]:<48} → {result:<8} (exp {expected})")
+                if result == expected:
+                    print("  ✅ OK")
+                    score += 1
             except Exception as exc:
                 print(f"{txt[:48]:<48} → ERROR: {exc}")
         print(f"Time: {time.time() - start:.2f} s")
+        print(f"Score: {score}/{len(tests)}\n")
 # ╰─────────────────────────────────────────────────────────────────────╯
