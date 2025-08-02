@@ -1,18 +1,16 @@
 from __future__ import annotations
-from typing import List
+from typing import List, Dict
 import os, re, unicodedata, statistics, math, litellm
 
 """
-llm_classifier.py – B2B‑reply sentiment (Ollama / Mistral)
+llm_classifier.py – B2B-reply sentiment (Ollama / Mistral)
 ──────────────────────────────────────────────────────────
-Všechny funkce přebalené do třídy **LLMClassifier** + demo.
-
 • Režimy: "simple", "crewai", "highend"
-• Parametr `lead_limit_days` = max zpoždění považované za *positive*
-• Zachována zpětná kompatibilita přes modul‑level funkci `classify_email()`
+• lead_limit_days = max. zpoždění považované za *positive*
+• Back-compat modul-level          classify_email()
 """
 
-# ╭─ Konstanta & env ──────────────────────────────────────────────────╮
+# ╭─ Konstanta & env ───────────────────────────────────────────────╮
 _MODEL       = os.getenv("LLM_CLASSIFIER_MODEL", "ollama/mistral:latest")
 _OLLAMA_URL  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 os.environ.setdefault("OLLAMA_BASE_URL", _OLLAMA_URL)
@@ -20,29 +18,71 @@ os.environ.setdefault("OLLAMA_BASE_URL", _OLLAMA_URL)
 _DEFAULT_MODE       = os.getenv("LLM_CLASSIFIER_MODE", "simple").lower()
 _DEFAULT_LEAD_DAYS  = int(os.getenv("LEAD_LIMIT_DAYS", "14"))
 _DEFAULT_ENSEMBLE_N = int(os.getenv("LLM_ENSEMBLE_N", "5"))
-# ╰────────────────────────────────────────────────────────────────────╯
+# ╰─────────────────────────────────────────────────────────────────╯
 
 
 class LLMClassifier:
     """Klasifikátor sentimentu odpovědi dodavatele."""
 
-    # ╭── Prompt, regexy, mapy ───────────────────────────────────────╮
+    # ╭── Prompt & label ────────────────────────────────────────────╮
     PROMPT = (
-        'email response: "{reply}"\n'
-        "Decide:\n"
-        "  1  → positive (they CAN supply / CAN do the job)\n"
-        "  0  → neutral  (cannot exactly, but offer ALTERNATIVE)\n"
-        " -1 → negative (they CANNOT help at all)\n"
-        "Return *only* one tag: <ANSWER>1</ANSWER> / <ANSWER>0</ANSWER> / <ANSWER>-1</ANSWER>"
+        "You are a procurement assistant. Your task is to label supplier e-mails.\n"
+        'Input (between quotes): "{reply}"\n\n'
+        "**Rules**\n"
+        "• <ANSWER>1</ANSWER>  → **positive**   = They clearly CAN supply / CAN do the job within acceptable lead time (≤14 days).\n"
+        "• <ANSWER>0</ANSWER>  → **neutral**    = Not exactly, but offer an ALTERNATIVE / partial fulfilment / or lead time >14 days.\n"
+        "• <ANSWER>-1</ANSWER> → **negative**   = They CANNOT help, decline, have no stock, no capacity, or permanently refuse.\n\n"
+        "Edge cases:\n"
+        "— Phrases like *unable to assist*, *must decline*, *regrettably cannot* ⇒ -1\n"
+        "— Uncertain answers (*maybe, not sure, depends*) ⇒ 0\n"
+        "Return ONLY the tag <ANSWER>…</ANSWER> with -1, 0, or 1. Nothing else."
     )
     LABEL = {1: "positive", 0: "neutral", -1: "negative"}
 
-    UNCERTAIN_PAT   = r"\b(i[’']?m not sure|maybe|perhaps|depends|uncertain|nejsem si jist|možná)\b"
-    ALTERNATIVE_PAT = r"\b(similar|alternative|instead|other product|jiný výrobek|náhrada)\b"
-    DELAY_PAT       = r"\b(not before|no earlier than|next month|next year|in \d+(?:\.\d+)? (day|week|month|year)s?)\b"
-    NEGATIVE_PAT    = r"\b(no stock|out of stock|no capacity|cannot|can[’']?t|nemůžeme|neskladem|bez kapacity)\b"
-    DELAY_EXTRACT   = re.compile(r"in\s+(\d+(?:\.\d+)?)\s+(day|week|month|year)s?", re.I)
-    # ╰───────────────────────────────────────────────────────────────╯
+    # ╭── Regexy & slovní čísla ─────────────────────────────────────╮
+    UNCERTAIN_PAT = r"\b(i[’']?m\s+not\s+sure|maybe|perhaps|depends|uncertain|nejsem\s+si\s+jist|možná)\b"
+
+    ALTERNATIVE_PAT = r"\b(similar|alternative|instead|other\s+product|jiný\s+výrobek|náhrada)\b"
+
+    # robustní odchyt odmítnutí
+    NEGATIVE_PAT = r"""
+        \b(
+            unable\s+to|not\s+able\s+to|must\s+decline|declin(e|ing)\s+this|
+            (?:regrettably|sadly|sorry)[\w\s,]*\s+cannot|
+            cannot|can['’]?t|
+            no\s+stock|out\s+of\s+stock|
+            no\s+capacity|without\s+capacity|
+            neskladem|nem[oů]žeme|
+            bez\s+kapacity
+        )\b
+    """
+
+    # odchyt zpoždění – „in/about/within 3 weeks“, „take 4 weeks“, „another three weeks“, …
+    DELAY_EXTRACT = re.compile(
+        r"""
+        (?:
+            (?:in|within|after|about|around|approximately|roughly|another|up\s*to)\s+ |
+            (?:take|takes|needs|need|lead\s*time\s*of)\s+
+        )?
+        (?P<num>\d+(?:\.\d+)?|
+            one|two|three|four|five|six|seven|eight|nine|ten|
+            eleven|twelve|thirteen|fourteen|fifteen|sixteen|
+            seventeen|eighteen|nineteen|twenty
+        )
+        \s+
+        (?P<unit>day|week|month|year)s?
+        """,
+        re.I | re.X,
+    )
+
+    _WORD2NUM: Dict[str, int] = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+        "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+        "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+        "nineteen": 19, "twenty": 20,
+    }
+    # ╰──────────────────────────────────────────────────────────────╯
 
     try:
         from crewai import Agent, Task, Crew, Process  # type: ignore
@@ -50,7 +90,7 @@ class LLMClassifier:
     except ImportError:
         _CREW_AVAILABLE = False
 
-    # ╭── Init ───────────────────────────────────────────────────────╮
+    # ╭── Init ──────────────────────────────────────────────────────╮
     def __init__(
         self,
         *,
@@ -70,9 +110,9 @@ class LLMClassifier:
             if not self._CREW_AVAILABLE:
                 raise RuntimeError("CrewAI není instalováno → pip install crewai")
             self._init_crewai_agent()
-    # ╰───────────────────────────────────────────────────────────────╯
+    # ╰──────────────────────────────────────────────────────────────╯
 
-    # ╭── Low‑level helpers ──────────────────────────────────────────╮
+    # ╭── Low-level helpers ────────────────────────────────────────╮
     def _ask_llm(self, reply: str) -> str:
         msg = [{"role": "user", "content": self.PROMPT.format(reply=reply)}]
         resp = litellm.completion(model=self.model, messages=msg, temperature=0)
@@ -93,48 +133,68 @@ class LLMClassifier:
         m = cls.DELAY_EXTRACT.search(text_lc)
         if not m:
             return None
-        qty = float(m.group(1).replace(',', '.'))
-        unit = m.group(2).lower()
-        factor = 1 if unit.startswith("day") else 7 if unit.startswith("week") else 30 if unit.startswith("month") else 365
+        num_raw = m.group("num").lower()
+        qty = float(cls._WORD2NUM.get(num_raw, num_raw))
+        unit = m.group("unit").lower()
+        factor = {"day": 1, "week": 7, "month": 30, "year": 365}[unit[:4]]
         return math.ceil(qty * factor)
 
     @classmethod
     def _normalize(cls, value: int, reply: str, limit_days: int) -> int:
         reply_lc = unicodedata.normalize("NFKD", reply).lower()
-        if value != 1:
-            return value
-        if re.search(cls.UNCERTAIN_PAT, reply_lc) or re.search(cls.ALTERNATIVE_PAT, reply_lc):
-            return 0
-        delay = cls._parse_delay_days(reply_lc)
-        if delay is not None and delay > limit_days:
-            return 0
-        if delay is None and re.search(cls.DELAY_PAT, reply_lc):
-            return 0
+
+        # 1️⃣ odmítnutí má absolutní prioritu
         if re.search(cls.NEGATIVE_PAT, reply_lc):
             return -1
-        return value
-    # ╰───────────────────────────────────────────────────────────────╯
 
-    # ╭── SIMPLE ──────────────────────────────────────────────────────╮
+        # 2️⃣ přepočet z 1/0 na základě alternativ, nejistoty a zpoždění
+        if value == 1:
+            if re.search(cls.UNCERTAIN_PAT, reply_lc) or re.search(cls.ALTERNATIVE_PAT, reply_lc):
+                return 0
+
+            delay = cls._parse_delay_days(reply_lc)
+            if delay is not None:
+                if delay > limit_days:
+                    return 0
+            else:
+                # fallback – pokud zmíní jakékoli „week/month/year“ a nemáme explicitní ≤14 d
+                if re.search(r"\b(week|month|year)s?\b", reply_lc):
+                    return 0
+
+        return value
+    # ╰──────────────────────────────────────────────────────────────╯
+
+    # ╭── SIMPLE ────────────────────────────────────────────────────╮
     def _classify_simple(self, reply: str) -> str:
         raw = self._ask_llm(reply)
         val = self._normalize(self._extract_int(raw), reply, self.lead_limit_days)
         return self.LABEL[val]
-    # ╰───────────────────────────────────────────────────────────────╯
+    # ╰──────────────────────────────────────────────────────────────╯
 
-    # ╭── CREWAI ──────────────────────────────────────────────────────╮
+    # ╭── CREWAI ────────────────────────────────────────────────────╮
     def _init_crewai_agent(self) -> None:
-        from crewai import Agent  # type: ignore
-        self._agent = Agent(role="Reply Classifier", goal="Return <ANSWER>-1/0/1</ANSWER>",
-                             backstory="Understands supplier replies.", system_prompt=self.PROMPT,
-                             llm=self.model, tools=[], verbose=False, memory=False, allow_delegation=False)
+        from crewai import Agent
+        self._agent = Agent(
+            role="Reply Classifier",
+            goal="Return <ANSWER>-1/0/1</ANSWER>",
+            backstory="Understands supplier replies.",
+            system_prompt=self.PROMPT,
+            llm=self.model,
+            tools=[],
+            verbose=False,
+            memory=False,
+            allow_delegation=False,
+        )
 
     def _classify_crewai(self, reply: str) -> str:
-        from crewai import Task, Crew, Process  # type: ignore
+        from crewai import Task, Crew, Process
         attempts = 0
         while attempts <= self.max_retries:
-            task = Task(description=self.PROMPT.format(reply=reply), expected_output="<ANSWER>-1/0/1</ANSWER>", agent=self._agent)
-            crew = Crew(agents=[self._agent], tasks=[task], process=Process.sequential, manager_llm=self.model)
+            task = Task(description=self.PROMPT.format(reply=reply),
+                        expected_output="<ANSWER>-1/0/1</ANSWER>",
+                        agent=self._agent)
+            crew = Crew(agents=[self._agent], tasks=[task],
+                        process=Process.sequential, manager_llm=self.model)
             answer = str(crew.kickoff())
             try:
                 val = self._normalize(self._extract_int(answer), reply, self.lead_limit_days)
@@ -142,9 +202,9 @@ class LLMClassifier:
             except ValueError:
                 attempts += 1
         raise ValueError("CrewAI retries exceeded")
-    # ╰───────────────────────────────────────────────────────────────╯
+    # ╰──────────────────────────────────────────────────────────────╯
 
-    # ╭── HIGHEND ────────────────────────────────────────────────────╮
+    # ╭── HIGHEND (ensemble) ───────────────────────────────────────╮
     def _classify_highend(self, reply: str) -> str:
         votes, errors = [], []
         for _ in range(self.ensemble_n):
@@ -158,9 +218,9 @@ class LLMClassifier:
         majority = statistics.mode(votes) if len(set(votes)) == 1 else int(statistics.median(votes))
         val = self._normalize(majority, reply, self.lead_limit_days)
         return self.LABEL[val]
-    # ╰───────────────────────────────────────────────────────────────╯
+    # ╰──────────────────────────────────────────────────────────────╯
 
-    # ╭── Public API ─────────────────────────────────────────────────╮
+    # ╭── Public API ───────────────────────────────────────────────╮
     def classify(self, reply: str) -> str:
         if self.mode == "simple":
             return self._classify_simple(reply)
@@ -169,18 +229,21 @@ class LLMClassifier:
         if self.mode == "highend":
             return self._classify_highend(reply)
         raise ValueError(f"Unknown mode {self.mode}")
-    # ╰───────────────────────────────────────────────────────────────╯
+    # ╰──────────────────────────────────────────────────────────────╯
 
 
-# ╭─ Modul‑level wrapper ──────────────────────────────────────────────╮
+# ╭─ Modul-level wrapper ───────────────────────────────────────────╮
 def classify_email(reply: str, *, mode: str | None = None, lead_limit_days: int | None = None) -> str:
-    cls = LLMClassifier(mode=mode or _DEFAULT_MODE, lead_limit_days=lead_limit_days or _DEFAULT_LEAD_DAYS)
+    cls = LLMClassifier(mode=mode or _DEFAULT_MODE,
+                        lead_limit_days=lead_limit_days or _DEFAULT_LEAD_DAYS)
     return cls.classify(reply)
-# ╰────────────────────────────────────────────────────────────────────╯
+# ╰─────────────────────────────────────────────────────────────────╯
 
 
-# ╭─ 7. Demo ───────────────────────────────────────────────────────────╮
+# ╭─ Demo test runner (spustí se jen přímo) ────────────────────────╮
 if __name__ == "__main__":
+    import time
+
     # tests = [
     #     ("Hi, yes – we keep 500 pcs on stock and can ship tomorrow.",  "positive"),
     #     ("We don’t have X, but Y is similar and available.",           "neutral"),
@@ -333,19 +396,21 @@ if __name__ == "__main__":
         )
     ]
 
-    import time
-    for mode in ("simple", "crewai", "highend"):
+    for mode in ("simple", "highend"):
         score = 0
-        print(f"— {mode.upper()} —")
+        print(f"\n— {mode.upper()} —")
         start = time.time()
         for txt, expected in tests:
-            try:
-                result = classify_email(txt, mode=mode, lead_limit_days=14)
-                status = "✅" if result == expected else "❌"
-                print(f"{txt[:48]:<48} → {result:<8} (exp {expected}) {status}")
-                if result == expected:
-                    score += 1
-            except Exception as exc:
-                print(f"{txt[:48]:<48} → ERROR: {exc}")
-        print(f"Time: {time.time() - start:.2f} s | Score: {score}/{len(tests)}")
-# ╰─────────────────────────────────────────────────────────────────────╯
+            result = classify_email(txt, mode=mode, lead_limit_days=14)
+            ok = "✅" if result == expected else "❌"
+            print(f"{result:<8}({expected}) {ok}  | {txt}")
+            if ok == "✅":
+                score += 1
+        print(f"Time: {time.time()-start:.2f}s  Score: {score}/{len(tests)}")
+# ╰─────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
