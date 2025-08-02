@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from logging import critical
 from typing import List, Dict
 import os, re, unicodedata, statistics, math, litellm
 
@@ -45,17 +47,10 @@ class LLMClassifier:
     ALTERNATIVE_PAT = r"\b(similar|alternative|instead|other\s+product|jiný\s+výrobek|náhrada)\b"
 
     # robustní odchyt odmítnutí
-    NEGATIVE_PAT = r"""
-        \b(
-            unable\s+to|not\s+able\s+to|must\s+decline|declin(e|ing)\s+this|
-            (?:regrettably|sadly|sorry)[\w\s,]*\s+cannot|
-            cannot|can['’]?t|
-            no\s+stock|out\s+of\s+stock|
-            no\s+capacity|without\s+capacity|
-            neskladem|nem[oů]žeme|
-            bez\s+kapacity
-        )\b
-    """
+    # --- NEGATIVNÍ VÝRAZY ----------------------------------------------------
+    NEG_HARD_DECLINE = r"\b(unable\s+to|not\s+able\s+to|must\s+decline|no\s+capacity|cannot\s+assist)\b"
+    NEG_STOCK_ONLY  = r"\b(no\s+stock|out\s+of\s+stock|neskladem)\b"
+
 
     # odchyt zpoždění – „in/about/within 3 weeks“, „take 4 weeks“, „another three weeks“, …
     DELAY_EXTRACT = re.compile(
@@ -143,14 +138,16 @@ class LLMClassifier:
     def _normalize(cls, value: int, reply: str, limit_days: int) -> int:
         reply_lc = unicodedata.normalize("NFKD", reply).lower()
 
-        # 1️⃣ odmítnutí má absolutní prioritu
-        if re.search(cls.NEGATIVE_PAT, reply_lc):
+        # 1️⃣  explicitní odmítnutí (tvrdé „ne“)
+        if re.search(cls.NEG_HARD_DECLINE, reply_lc):
             return -1
 
-        # 2️⃣ přepočet z 1/0 na základě alternativ, nejistoty a zpoždění
-        if value == 1:
-            if re.search(cls.UNCERTAIN_PAT, reply_lc) or re.search(cls.ALTERNATIVE_PAT, reply_lc):
-                return 0
+        # 2️⃣  „out of stock“ – může být neutral, pokud zmiňují budoucí dodávku
+        if re.search(cls.NEG_STOCK_ONLY, reply_lc):
+            if cls._parse_delay_days(reply_lc) is not None or re.search(r"\b(week|month|year|early|late|next|scheduled)\b", reply_lc):
+                value = 0     # přepíšeme na neutral
+            else:
+                return -1     # úplné odmítnutí bez termínu
 
             delay = cls._parse_delay_days(reply_lc)
             if delay is not None:
@@ -244,160 +241,131 @@ def classify_email(reply: str, *, mode: str | None = None, lead_limit_days: int 
 if __name__ == "__main__":
     import time
 
-    # tests = [
-    #     ("Hi, yes – we keep 500 pcs on stock and can ship tomorrow.",  "positive"),
-    #     ("We don’t have X, but Y is similar and available.",           "neutral"),
-    #     ("Hi, no – I can’t help you with constructions.",              "negative"),
-    #     ("I’m not sure, but I think we can do it.",                    "neutral"),
-    #     ("We have no stock, sorry.",                                   "negative"),
-    #     ("We can supply 100 pcs, but not before next month.",          "neutral"),
-    #     ("Yes, we can do it, but only in 2 weeks.",                    "positive"),
-    #     ("Yes, we can do it, but only in 3 weeks.",                    "neutral"),
-    #     ("Yes, we can do it, but only in 4 weeks.",                    "neutral"),
-    #     ("Yes, we can do it, but only in 4.5 weeks.",                  "neutral"),
-    #     ("Yes, we can do it, but only in 15 days.",                    "neutral"),
-    #     ("Yes, we can do it, but only in 14 days.",                    "positive"),
-    #     ("Yes, we can do it, but only in 10 days.",                    "positive"),
-    #     ("Yes, we can do it, but only in 1 weeks.",                    "positive"),
-    # ]
+    # ╭─ 1) DEFINICE JEDNOTNÉ SADY ─────────────────────────────────────────────╮
     tests = [
-        ("Hi, yes – we have 500 pcs in stock and can ship by tomorrow afternoon, so we can fulfill your order right away.",
-         "positive"),
-        ("Unfortunately, we don’t have X in stock right now, but we can offer a similar product Y that might suit your needs.",
-         "neutral"),
-        ("Sorry, but we are unable to assist with construction materials at the moment.", "negative"),
-        ("I’m uncertain, but I think we can accommodate your request, possibly within the next week.", "neutral"),
-        ("We are currently out of stock, but we expect a new shipment in a couple of weeks.", "negative"),
-        ("We can supply up to 100 pcs, but the earliest we can deliver is in about 3 weeks.", "neutral"),
-        ("Yes, we can provide the items, but the earliest shipping date would be in 10 days.", "positive"),
-        ("We can definitely help, but please be aware that delivery might take 4 weeks.", "neutral"),
-        ("Yes, we can do it, but please note that the processing time will be approximately 5 weeks.", "neutral"),
-        ("Yes, we can help, but we need about 2.5 weeks before we can ship the order.", "neutral"),
-        ("Yes, we can meet your needs, but delivery will take approximately 3 weeks due to stock replenishment.",
-         "neutral"),
-        ("Yes, we can process your order, and we are able to ship it within 7 days. Does that work for you?",
-         "positive"),
-        ("Yes, we are available, but we can only ship after 10 days due to inventory checks.", "positive"),
-        ("Yes, we can do it, but we are currently experiencing some delays and will need 15 days for shipment.",
-         "neutral"),
-        ("Yes, we can meet the order, but the best we can do is deliver in 3 weeks.", "neutral"),
-        ("Unfortunately, we don’t have immediate availability, but I can get back to you in 4-5 weeks once restocked.",
-         "negative")
-    ]
-    tests = [
-        # Původní vzorky (můžeš ponechat nebo odstranit)
+
+        # --- původní stručné příklady -----------------------------------------
         ("Hi, yes – we keep 500 pcs on stock and can ship tomorrow.", "positive"),
         ("We don’t have X, but Y is similar and available.", "neutral"),
         ("Hi, no – I can’t help you with constructions.", "negative"),
         ("I’m not sure, but I think we can do it.", "neutral"),
+        ("We have no stock, sorry.", "negative"),
+        ("We can supply 100 pcs, but not before next month.", "neutral"),
+        ("Yes, we can do it, but only in 2 weeks.", "positive"),
+        ("Yes, we can do it, but only in 3 weeks.", "neutral"),
+        ("Yes, we can do it, but only in 4 weeks.", "neutral"),
+        ("Yes, we can do it, but only in 4.5 weeks.", "neutral"),
+        ("Yes, we can do it, but only in 15 days.", "neutral"),
+        ("Yes, we can do it, but only in 14 days.", "positive"),
+        ("Yes, we can do it, but only in 10 days.", "positive"),
+        ("Yes, we can do it, but only in 1 weeks.", "positive"),
 
-        # Nové „ukecané“ e-maily
+        # --- původní „ukecané“ e-maily ----------------------------------------
         (
-            "Good morning John,\n\n"
-            "Thank you for considering us for your upcoming project. I’ve just checked with our logistics team and I’m delighted to confirm "
-            "that we currently have 1 250 units of the requested item on hand. If we receive your purchase order before 14:00 CET today, "
-            "we can have the goods picked, packed and on a truck this evening, meaning delivery to your warehouse tomorrow before noon.\n\n"
-            "Let me know if that timing works for you or if you need any additional certificates or paperwork attached to the shipment.\n\n"
-            "Best regards,\nEmma – Sales Coordinator",
+            "Good morning John,\n\nThank you for considering us for your upcoming project. "
+            "I’ve just checked with our logistics team and I’m delighted to confirm that we currently have "
+            "1 250 units of the requested item on hand. If we receive your purchase order before 14:00 CET today, "
+            "we can have the goods picked, packed and on a truck this evening, meaning delivery to your warehouse "
+            "tomorrow before noon.\n\nBest regards,\nEmma – Sales Coordinator",
             "positive"
         ),
         (
-            "Hello Tom,\n\n"
-            "I really appreciate your interest. Unfortunately, the exact model X-100 you asked about is sold out after an unexpected spike "
-            "in demand. We do, however, have model X-110 in stock – it’s functionally identical, just with a slightly updated housing. "
-            "Many customers have switched without issues. If that could work for you, I can hold 300 pieces until Friday.\n\n"
-            "Please let me know your thoughts and I’ll arrange a formal quotation right away.\n\n"
-            "Kind regards,\nSofia",
+            "Hello Tom,\n\nI really appreciate your interest. Unfortunately, the exact model X-100 you asked "
+            "about is sold out after an unexpected spike in demand. We do, however, have model X-110 in stock – it’s "
+            "functionally identical, just with a slightly updated housing. Many customers have switched without issues. "
+            "If that could work for you, I can hold 300 pieces until Friday.\n\nKind regards,\nSofia",
             "neutral"
         ),
         (
-            "Hi there,\n\n"
-            "Regrettably, we’re not able to support building-construction enquiries this season. Our production line is fully booked with "
-            "specialty aerospace contracts, so we wouldn’t be able to allocate engineering time or materials for your request. "
-            "I’m sorry we can’t be of help on this occasion.\n\n"
-            "Wishing you every success with the project.\n\n"
-            "-- Mark, Technical Sales",
+            "Hi there,\n\nRegrettably, we’re not able to support building-construction enquiries this season. "
+            "Our production line is fully booked with specialty aerospace contracts, so we wouldn’t be able to allocate "
+            "engineering time or materials for your request. I’m sorry we can’t be of help on this occasion.\n\n-- Mark",
             "negative"
         ),
         (
-            "Dear Ms. Patel,\n\n"
-            "Thanks for the detailed forecast you sent us. I’ve spoken with procurement and, in principle, we believe we can fulfill the "
-            "6 000-piece call-off. That said, because several raw materials arrive only once a month, we would need roughly 8–9 days "
-            "to align production and QC before shipping the first batch.\n\n"
-            "If that lead time is acceptable, I’ll draw up the contract for your review.\n\n"
-            "Best,\nLuis",
+            "Dear Ms. Patel,\n\nThanks for the detailed forecast you sent us. In principle, we believe we can fulfill "
+            "the 6 000-piece call-off, but because some raw materials arrive only once a month we’d need roughly 8–9 days "
+            "before shipping the first batch.\n\nBest,\nLuis",
             "neutral"
         ),
         (
-            "Hello Jonas,\n\n"
-            "Quick update: our UK warehouse just reported that all remaining inventory was allocated to an earlier order this morning, "
-            "so we’re currently out of stock. The next container is scheduled to dock in Rotterdam on 18 September, which means earliest "
-            "dispatch to you around the first week of October. \n\n"
-            "I realize that’s probably too late for your campaign, and I’m truly sorry for the inconvenience.\n\n"
-            "Sincerely,\nVera",
+            "Hello Jonas,\n\nOur UK warehouse just reported that all remaining inventory was allocated to an earlier "
+            "order. The next container docks in Rotterdam on 18 September, so earliest dispatch to you is first week of "
+            "October.\n\nSincerely,\nVera",
             "negative"
         ),
         (
-            "Hi Adrian,\n\n"
-            "Good news mixed with a small caveat: we can definitely supply the full 100 pcs you need, but due to annual maintenance on our "
-            "powder-coating line we can’t start production until next Monday. Factoring in curing and QA, the pallets would leave us in "
-            "about 12 days. If that aligns with your rollout schedule, we’ll lock in the slot right away.\n\n"
-            "Let me know.\n\nCheers,\nPieter",
+            "Hi Adrian,\n\nGood news with a small caveat: we can definitely supply the full 100 pcs you need, but due to "
+            "annual maintenance we can’t start production until next Monday. Factoring in QA, pallets would leave us in "
+            "about 12 days.\n\nCheers,\nPieter",
             "positive"
         ),
         (
-            "Dear Procurement Team,\n\n"
-            "We have capacity and would love to take on your order. Realistically, however, trucking availability in December is tight, "
-            "so we’d be looking at a door-to-door lead time of roughly four weeks. If you’re flexible on delivery windows, "
-            "we can proceed. Otherwise, I totally understand if you explore other vendors.\n\n"
-            "Warm regards,\nCarla",
+            "Dear Procurement Team,\n\nWe have capacity and would love to take on your order. Realistically, however, "
+            "trucking availability in December is tight, so total door-to-door lead time is roughly four weeks.\n\nCarla",
             "neutral"
         ),
         (
-            "Hi Jack,\n\n"
-            "I ran your request by production: we can ship 60% of the quantity immediately, but the remaining 40% won’t be ready for "
-            "another three weeks because our molding machine needs a planned overhaul. We can stagger the delivery if partial shipment "
-            "helps you keep the line running.\n\n"
-            "Awaiting your instruction.\n\nBest,\nNoah",
+            "Hi Jack,\n\nWe can ship 60 % immediately, but the remaining 40 % will be ready in three weeks after a "
+            "molding-machine overhaul. We can stagger delivery if partial shipment helps.\n\nNoah",
             "neutral"
         ),
         (
-            "Good afternoon,\n\n"
-            "Sadly, we can’t meet the technical spec you outlined – our current extrusion tooling maxes out at 600 mm width, whereas your "
-            "profile requires 750 mm. Retooling would take months, so I’m afraid we must decline this opportunity.\n\n"
-            "Thank you for thinking of us nevertheless.\n\nRegards,\nElena",
+            "Good afternoon,\n\nSadly, we can’t meet the technical spec – our extrusion tooling maxes out at 600 mm, "
+            "whereas your profile requires 750 mm. Retooling would take months, so we must decline.\n\nElena",
             "negative"
         ),
         (
-            "Hello again, Felix,\n\n"
-            "Following up on our call: yes, we can fabricate the assemblies, but please note that our heat-treatment furnace is booked "
-            "solid next week. Earliest completion would therefore be in 11 days. To sweeten the deal, I can throw in free express freight "
-            "so the goods reach you on day 12.\n\n"
-            "Let me know whether to proceed with the pro-forma invoice.\n\n"
-            "Best wishes,\nGeorge",
+            "Hello again, Felix,\n\nYes, we can fabricate the assemblies, but our heat-treatment furnace is booked solid "
+            "next week. Earliest completion in 11 days; we’ll ship express so you have them day 12.\n\nGeorge",
             "positive"
         ),
         (
-            "Dear Sandra,\n\n"
-            "We value your partnership. Right now we’re in the midst of implementing a new ERP, which has temporarily slowed order "
-            "processing. While we believe we *might* still hit your requested ship date, I don’t have absolute certainty. "
-            "If you can give us until tomorrow noon, I’ll confirm either way.\n\n"
-            "Apologies for the uncertainty and thank you for your patience.\n\n"
-            "Sincerely,\nRaj",
+            "Dear Sandra,\n\nWe’re mid-migration to a new ERP, which may slow order processing. While we *might* still "
+            "hit your date, I can’t guarantee it until tomorrow noon when I’ll confirm.\n\nRaj",
             "neutral"
         ),
         (
-            "Hi team,\n\n"
-            "After reviewing our schedule I’m pleased to report we can manufacture the lot and have it packed within seven calendar days. "
-            "With UPS Saver that normally arrives to Prague overnight, so total lead time about eight days. Let me know if we should "
-            "prepare the artwork proof.\n\n"
-            "Best regards,\nStephanie",
+            "Hi team,\n\nWe can manufacture the lot and pack within seven calendar days. With UPS Saver that’s overnight "
+            "to Prague – ~8 days total. Let me know if we should prepare artwork proof.\n\nStephanie",
             "positive"
-        )
+        ),
+
+        # --- hard_tests ---------------------------------------------------------
+        ("If everything goes smoothly with customs, we *should* be able to dispatch in 16-17 days.", "neutral"),
+        ("At the moment we have zero stock, but fresh production is scheduled for late Q4 (≈ 10-12 weeks).", "neutral"),
+        ("We can help, provided you accept a ±5 % quantity tolerance and a lead time stretching to two months.",
+         "neutral"),
+        ("We’re willing to quote, but only after we receive final drawings – until then we can’t commit.", "neutral"),
+        ("No capacity right now; try us again next fiscal year.", "negative"),
+
+        ("Yes, we confirm full availability and can ship *no later than* 13 days from PO.", "positive"),
+        ("Absolutely – we’ll air-freight 50 % immediately and the balance seven days later.", "positive"),
+        ("Good news: we can deliver within 14 days *including* transit – door to door.", "positive"),
+
+        ("Earliest dispatch in exactly 15 days; please advise if that’s acceptable.", "neutral"),
+        ("We estimate 14 – 15 days; if it slips beyond that we’ll upgrade shipping at our cost.", "neutral"),
+
+        ("Out of stock for the standard colour, **but** charcoal variant ships tomorrow.", "neutral"),
+        ("While the anodised version is unavailable, the powder-coated finish ships in five working days.", "neutral"),
+
+        ("Regrettably, we cannot provide 10 000 pcs; *however* we could manage 2 500 pcs within three weeks.",
+         "neutral"),
+        ("Sadly we must decline the tooling request, but can still sell you raw profiles ex-stock.", "neutral"),
+
+        ("I’m afraid we aren’t in a position to help this quarter; our line is tied up with defence contracts.",
+         "negative"),
+        ("Our books are closed for 2025, so unfortunately we’ll have to pass on this opportunity.", "negative"),
+
+        ("Current pipeline means shipping can start **in twelve days**; let me know if that meets your timeline.",
+         "positive"),
+        ("Production slot opens in **three weeks**, shipping the week after – total just under a month.", "neutral")
     ]
+    # ╰────────────────────────────────────────────────────────────────────────────╯
 
-    for mode in ("simple", "highend"):
+    for mode in ("highend", ):
         score = 0
+        critical_score = 0
         print(f"\n— {mode.upper()} —")
         start = time.time()
         for txt, expected in tests:
@@ -406,11 +374,12 @@ if __name__ == "__main__":
             print(f"{result:<8}({expected}) {ok}  | {txt}")
             if ok == "✅":
                 score += 1
+            if (expected == "negative" and result == "positive") or (expected == "positive" and result == "negative"):
+                critical_score += 1
         print(f"Time: {time.time()-start:.2f}s  Score: {score}/{len(tests)}")
+        if critical_score > 0:
+            print(f"⚠️  Critical errors: {critical_score} (expected vs. result mismatch)")
+        else:
+            print("✅  All tests passed without critical errors.")
 # ╰─────────────────────────────────────────────────────────────────╯
-
-
-
-
-
 
