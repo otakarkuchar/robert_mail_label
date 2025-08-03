@@ -15,6 +15,7 @@ from label_manager  import LabelManager
 from message_filter import MessageFilter
 from forwarder      import Forwarder
 from llm_classifier_date import LLMClassifier
+import datetime, email.utils
 
 
 # ── konfigurace profilu (loader vyplní všechno) ─────────────────────
@@ -22,7 +23,6 @@ from llm_classifier_date import LLMClassifier
 class AppConfig:
     main_label: str
     intersection_labels: List[str]
-    vyhovuje_color: str = "#16a766"
 
     # zdroje dat
     keywords_file: str | None = "keywords.txt"
@@ -38,6 +38,7 @@ class AppConfig:
     # LLM
     llm_model:      str   = "mistral:instruct"
     llm_confidence: float = 0.20         # ±-zóna pro neutral
+    deadline_date: str | None = None  # ISO datum (YYYY-MM-DD)
     log_file:       str   = "log.txt"
 
 
@@ -76,24 +77,17 @@ class LabelerApp:
         ml = cfg.main_label
         parent_id = self.labels.get_or_create(ml)  # ← zajistí rodiče
 
-        self.pos_id = self.labels.get_or_create(f"{ml}/POZITIVNÍ ODPOVĚĎ")
-        self.neg_id = self.labels.get_or_create(f"{ml}/NEGATIVNÍ ODPOVĚĎ")
-        self.neu_id = self.labels.get_or_create(f"{ml}/NEUTRÁLNÍ ODPOVĚĎ")
-        self.done_id = self.labels.get_or_create(f"{ml}/PROCESSED")
-
         C_POS = "#16a766"  # zelená
-        C_NEG = "#d93025"  # červená
+        C_POS_OUT_OF_TERM = "#b3efd3"  # zelená (pro odpovědi mimo termín)
+        C_NEG = "#fb4c2f"  # červená
         C_NEU = "#eab308"  # žlutá / oranžová
-        # C_POS = "#34A853"  # zelená
-        # C_NEG = "#EA4335"  # červená
-        # C_NEU = "#FABB05"  # žlutá
-        # C_DONE = "#B0B0B0"  # šedá
+        C_DONE = "#999999"
 
-        self.pos_id = self.labels.get_or_create(f"{ml}/POZITIVNÍ ODPOVĚĎ", color_hex=C_POS)
-        self.pos_term_id = self.labels.get_or_create(f"{ml}/POZITIVNÍ ODPOVĚĎ_TERMÍN", color_hex=C_POS)
-        self.neg_id = self.labels.get_or_create(f"{ml}/NEGATIVNÍ ODPOVĚĎ", color_hex=C_NEG)
-        self.neu_id = self.labels.get_or_create(f"{ml}/NEUTRÁLNÍ ODPOVĚĎ", color_hex=C_NEU)
-        self.done_id = self.labels.get_or_create(f"{ml}/PROCESSED", color_hex="#9aa0a6")
+        self.pos_id = self.labels.get_or_create(f"{ml}/✅ Pozitive", color_hex=C_POS)
+        self.pos_term_id = self.labels.get_or_create(f"{ml}/☑ Pozitive - out of term", color_hex=C_POS_OUT_OF_TERM)
+        self.neg_id = self.labels.get_or_create(f"{ml}/❌ Negative", color_hex=C_NEG)
+        self.neu_id = self.labels.get_or_create(f"{ml}/⬜ Neutral", color_hex=C_NEU)
+        self.done_id = self.labels.get_or_create(f"{ml}/🆗 PROCESSED", color_hex=C_DONE)
 
         print(f"[DEBUG] Profil {cfg.main_label!r} → LLM = {cfg.llm_model}")
 
@@ -142,6 +136,31 @@ class LabelerApp:
         ).execute()
         return self.done_id in meta.get("labelIds", [])
 
+    def _email_iso_date(self, msg_id: str) -> str | None:
+        """Vrátí ISO datum (YYYY-MM-DD) z hlavičky Date nebo internalDate."""
+        meta = self.gmail._service.users().messages().get(
+            userId="me", id=msg_id,
+            format="metadata",
+            metadataHeaders=["Date"]
+        ).execute()
+
+        # 1) z hlavičky „Date“
+        for h in meta.get("payload", {}).get("headers", []):
+            if h["name"].lower() == "date":
+                try:
+                    dt = email.utils.parsedate_to_datetime(h["value"])
+                    return dt.date().isoformat()
+                except Exception:
+                    pass
+
+        # 2) fallback – pole internalDate (ms od epochy)
+        if "internalDate" in meta:
+            ts = int(meta["internalDate"]) / 1000
+            return datetime.datetime.utcfromtimestamp(ts).date().isoformat()
+
+        return None
+
+
     # ── pomocné metody ───────────────────────────────────────────────
     def _classify_and_tag(
         self,
@@ -152,13 +171,14 @@ class LabelerApp:
     ):
         text = self._plain_text(msg_id)
 
+        ddl = deadline_date or self.cfg.deadline_date  # globální profilová deadline
+        sent = email_date or self._email_iso_date(msg_id)  # reálné datum přijetí
+
         # předáme nové údaje LLM-klasifikátoru
         sentiment = self.llm.classify(
             text,
-            # deadline_date=deadline_date,
-            # email_date=email_date,
-            deadline_date="2025-08-10",
-            email_date="2025-08-03",
+            deadline_date=ddl,
+            email_date=sent,
         )
 
         tag = {
@@ -177,9 +197,11 @@ class LabelerApp:
 
         # přepošli jen kladné odpovědi, když je forwarder aktivní
         if sentiment == "positive" and self.forwarder:
-            self.forwarder.forward(msg_id, f"{self.cfg.main_label}/POZITIVNÍ ODPOVĚĎ")
+            self.forwarder.forward(msg_id, f"{self.cfg.main_label}/✅ Pozitive")
         elif sentiment == "positive_out_of_term" and self.forwarder:
-            self.forwarder.forward(msg_id, f"{self.cfg.main_label}/POZITIVNÍ ODPOVĚĎ_TERMÍN")
+            self.forwarder.forward(msg_id, f"{self.cfg.main_label}/☑ Pozitive - out of term")
+        elif sentiment == "neutral" and self.forwarder:
+            self.forwarder.forward(msg_id, f"{self.cfg.main_label}/⬜ Neutral")
 
         logging.info("msg %s → %s", msg_id, sentiment)
 

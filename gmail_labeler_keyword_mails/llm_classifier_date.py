@@ -5,7 +5,7 @@ from typing import Dict, Optional, Union
 # ── ENV & defaults ──────────────────────────────────────────────────────────
 _MODEL = os.getenv("LLM_CLASSIFIER_MODEL", "ollama/mistral:latest")
 os.environ.setdefault("OLLAMA_BASE_URL", os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
-_DEFAULT_MODE = os.getenv("LLM_CLASSIFIER_MODE", "simple").lower()
+_DEFAULT_MODE = os.getenv("LLM_CLASSIFIER_MODE", "highend").lower()
 _DEFAULT_LEAD_DAYS = int(os.getenv("LEAD_LIMIT_DAYS", "14"))
 _DEFAULT_ENSEMBLE_N = int(os.getenv("LLM_ENSEMBLE_N", "5"))
 

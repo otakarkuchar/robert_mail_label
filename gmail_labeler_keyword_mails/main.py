@@ -27,11 +27,11 @@ def load_profiles() -> List[AppConfig]:
         cfg = AppConfig(
             main_label=data["main_label"],
             intersection_labels=data.get("intersection_labels", [data["main_label"]]),
-            vyhovuje_color=data.get("vyhovuje_color", "#16a766"),
             forward_to=data.get("forward_to"),
-            keywords_file=None,
-            emails_file=None,
+            keywords_file=data.get("keywords", None),
+            emails_file=data.get("senders", None),
             llm_model=data.get("llm_model", "ollama/mistral:latest"),  # ← přidáno
+            deadline_date=data.get("deadline_date"),
             llm_confidence=data.get("llm_confidence", 0.20),  # ← a rovnou i threshold
         )
 

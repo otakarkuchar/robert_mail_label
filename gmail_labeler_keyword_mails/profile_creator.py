@@ -16,12 +16,11 @@ class ProfileData:
     keywords: list[str]
     senders: list[str]
     intersection_labels: list[str]
-    vyhovuje_color: str = "#16a766"
-    forward_to: str | None = None
+    forward_to: str or None = None
     header_name: str = "X-Label"
     schedule_minutes: int | None = None
     include_sent: bool = False          # ← NEW
-    deadline_date: str | None = None  # ISO YYYY-MM-DD
+    deadline_date: str or None = None  # ISO YYYY-MM-DD
 
 
 class ProfileCreator:
@@ -52,7 +51,7 @@ if __name__ == "__main__":
     snd_in = input("Odesílatelé (čárkou): ").strip()
     snds = [s.strip() for s in snd_in.split(",") if s.strip()] if snd_in else []
 
-    intr_default = f"{main_label}/POZITIVNÍ ODPOVĚĎ"
+    intr_default = f"{main_label}/✅ Pozitive"
     intr_in = input(f"Intersection štítky (Enter → '{intr_default}'): ").strip()
     intersection = [main_label, intr_in or intr_default]
 
