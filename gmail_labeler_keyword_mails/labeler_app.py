@@ -142,22 +142,37 @@ class LabelerApp:
         ).execute()
         return self.done_id in meta.get("labelIds", [])
 
-    def _classify_and_tag(self, msg_id: str):
+    # ── pomocné metody ───────────────────────────────────────────────
+    def _classify_and_tag(
+        self,
+        msg_id: str,
+        *,
+        deadline_date: str | None = None,
+        email_date:   str | None = None,
+    ):
         text = self._plain_text(msg_id)
-        sentiment = self.llm.classify(text)
 
-        tag = {"positive": self.pos_id,
-               "negative": self.neg_id,
-               "neutral":  self.neu_id}[sentiment]
+        # předáme nové údaje LLM-klasifikátoru
+        sentiment = self.llm.classify(
+            text,
+            deadline_date=deadline_date,
+            email_date=email_date,
+        )
 
+        tag = {
+            "positive": self.pos_id,
+            "negative": self.neg_id,
+            "neutral":  self.neu_id,
+        }[sentiment]
+
+        # vyčisti staré štítky a přidej nové
+        self.gmail.modify_labels(msg_id, remove=[self.pos_id, self.neg_id, self.neu_id])
         self.gmail.modify_labels(
             msg_id,
-            remove=[self.pos_id, self.neg_id, self.neu_id],
+            add=[tag, self.done_id, self.labels.id(self.cfg.main_label)],
         )
 
-        self.gmail.modify_labels(msg_id,add=[tag, self.done_id, self.labels.id(self.cfg.main_label)]  # ← tady
-        )
-
+        # přepošli jen kladné odpovědi, když je forwarder aktivní
         if sentiment == "positive" and self.forwarder:
             self.forwarder.forward(msg_id, f"{self.cfg.main_label}/POZITIVNÍ ODPOVĚĎ")
 
