@@ -1,17 +1,16 @@
 """gmail_triage.auth_setup
 Interactive authentication helper; called from crew.py before tools load.
 
-2025‑06‑23 – Gmail branch now **directly uses the working snippet supplied by the
+2025‑06‑23 – Gmail branch now **directly uses the working snippet supplied by the
 user** (readonly scope, InstalledAppFlow).  The only change is the save path –
 token.json is written into the *package root* (`email_ai_agent/`) so that every
 existing tool (`gmail_fetch.py`, `gmail_actions.py`) finds it.
 
-Functions
----------
-    ensure_auth() -> Literal["gmail", "outlook"]
-        Ask the user whether to use Gmail or Outlook, run the chosen auth flow,
-        save credentials, and return the provider.
+2025‑08‑03 – Token filename now built **automatically** from the authenticated
+Gmail address (e.g. *token_kuchar.ota3_at_gmail.com.json*).  No manual edits
+needed and typos are impossible; multiple accounts can live side‑by‑side.
 """
+
 from __future__ import annotations
 
 import os
@@ -20,16 +19,15 @@ import time
 import webbrowser
 from pathlib import Path
 from typing import Final, Literal
-import json
+
 import requests
 from msal import PublicClientApplication, SerializableTokenCache
 
-#  ── Package root (…/email_ai_agent) ────────────────────────────────────────
-PACKAGE_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
-GMAIL_TOKEN_PATH: Final[Path] = PACKAGE_ROOT / "token.json"
+# ────────────────────────────  Package root  ───────────────────────────────
+PACKAGE_ROOT: Final[Path] = Path(__file__).resolve().parents[0]
 OUTLOOK_CACHE_PATH: Final[Path] = PACKAGE_ROOT / ".msal_token_cache.bin"
 
-#  ────────────────────────────  Gmail  ─────────────────────────────────────
+# ───────────────────────────────  Gmail  ───────────────────────────────────
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -51,30 +49,83 @@ CLIENT_CONFIG: Final[dict] = {
     }
 }
 
+# ──────────────────────────  Helper functions  ─────────────────────────────
+
+def _build_token_path(email: str) -> Path:
+    """Return *PACKAGE_ROOT/token_<user>_at_<domain>.json*."""
+    email_safe = email.lower().replace("@", "_at_")
+    return PACKAGE_ROOT / f"token_{email_safe}.json"
+
+
+def _get_email(creds: Credentials) -> str | None:
+    """Retrieve the *primary* Gmail address associated with *creds*."""
+    try:
+        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        profile = service.users().getProfile(userId="me").execute()
+        return profile.get("emailAddress")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ───────────────────────────  Gmail flow  ──────────────────────────────────
 
 def _ensure_gmail_token() -> None:
-    """Create/refresh *token.json* in PACKAGE_ROOT using the user's snippet."""
+    """Make sure a valid token file exists **per account** under *PACKAGE_ROOT*."""
 
     creds: Credentials | None = None
-    if GMAIL_TOKEN_PATH.exists():
-        creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_PATH, GMAIL_SCOPES)
+    token_path: Path | None = None
+    email: str | None = None
 
-    # (re)authenticate if needed ------------------------------------------------
+    # 1️⃣ Look for any *token_*_at_*.json* that is still valid ------------------
+    for candidate in PACKAGE_ROOT.glob("token_*_at_*.json"):
+        try:
+            tmp_creds = Credentials.from_authorized_user_file(candidate, GMAIL_SCOPES)
+        except Exception:  # noqa: BLE001
+            continue
+        if tmp_creds and tmp_creds.valid:
+            maybe_email = _get_email(tmp_creds)
+            if maybe_email:
+                creds, email, token_path = tmp_creds, maybe_email, candidate
+                break
+
+    # 2️⃣ Fallback: legacy *token.json* from older versions ---------------------
+    if not creds:
+        legacy = PACKAGE_ROOT / "token.json"
+        if legacy.exists():
+            try:
+                tmp_creds = Credentials.from_authorized_user_file(legacy, GMAIL_SCOPES)
+            except Exception:  # noqa: BLE001
+                tmp_creds = None
+            if tmp_creds and tmp_creds.valid:
+                maybe_email = _get_email(tmp_creds)
+                if maybe_email:
+                    email = maybe_email
+                    token_path = _build_token_path(email)
+                    legacy.rename(token_path)
+                    creds = tmp_creds
+
+    # 3️⃣ Refresh / authenticate if needed ------------------------------------
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             print("🔄  Obnovuji Gmail refresh token …")
             creds.refresh(Request())
         else:
             flow = InstalledAppFlow.from_client_config(CLIENT_CONFIG, GMAIL_SCOPES)
-            creds = flow.run_local_server(port=0)  # opens browser
+            creds = flow.run_local_server(port=0)  # Opens browser
 
-        GMAIL_TOKEN_PATH.write_text(creds.to_json(), encoding="utf‑8")
+        # Determine e‑mail now that we're authenticated
+        email = _get_email(creds) or "unknown@example.com"
+        token_path = _build_token_path(email)
 
-    # Quick sanity‑check – list labels -----------------------------------------
+    # 4️⃣ Persist the (possibly refreshed) credentials -------------------------
+    assert token_path is not None, "Token path should have been set"
+    token_path.write_text(creds.to_json(), encoding="utf-8")
+
+    # 5️⃣ Quick sanity‑check – list labels ------------------------------------
     try:
         service = build("gmail", "v1", credentials=creds, cache_discovery=False)
         labels = service.users().labels().list(userId="me").execute().get("labels", [])
-        print(f"\n📬  Gmail štítky: {len(labels)} nalezeno")
+        print(f"\n📬  Gmail štítky: {len(labels)} nalezeno pro {email}")
     except HttpError as e:
         if e.resp.status == 400 and "Mail service not enabled" in str(e):
             sys.exit(
@@ -83,7 +134,7 @@ def _ensure_gmail_token() -> None:
             )
         raise
 
-#  ───────────────────────────  Outlook  ─────────────────────────────────────
+# ───────────────────────────  Outlook flow  ────────────────────────────────
 
 OUTLOOK_CLIENT_ID = "ee871858-84e1-41f0-ade7-60659c305169"
 OUTLOOK_AUTHORITY = "https://login.microsoftonline.com/common"
@@ -99,17 +150,17 @@ def _ensure_outlook_token() -> None:
         OUTLOOK_CLIENT_ID, authority=OUTLOOK_AUTHORITY, token_cache=cache
     )
 
-    def _save_cache():
+    def _save_cache() -> None:  # noqa: D401 – inner helper
         if cache.has_state_changed:
             OUTLOOK_CACHE_PATH.write_text(cache.serialize())
 
-    # Silent login ------------------------------------------------------------
+    # Silent login -----------------------------------------------------------
     accounts = app.get_accounts()
     result = None
     if accounts:
         result = app.acquire_token_silent(OUTLOOK_SCOPES, account=accounts[0])
 
-    # Interactive device‑code flow -------------------------------------------
+    # Interactive device‑code flow ------------------------------------------
     if not result or "access_token" not in result:
         flow = app.initiate_device_flow(scopes=OUTLOOK_SCOPES)
         print(f"\n🔑  Otevři {flow['verification_uri']} a zadej kód: {flow['user_code']}\n")
@@ -122,8 +173,8 @@ def _ensure_outlook_token() -> None:
     _save_cache()
     print("✅  Outlook autorizace hotova.")
 
-    # Smoke‑test – list folders ----------------------------------------------
-    for attempt in range(10):
+    # Smoke‑test – list folders ---------------------------------------------
+    for _ in range(10):
         r = requests.get(
             "https://graph.microsoft.com/v1.0/me/mailFolders",
             headers={"Authorization": f"Bearer {result['access_token']}"},
@@ -138,12 +189,12 @@ def _ensure_outlook_token() -> None:
         else:
             sys.exit(f"❌ MS Graph selhal ({r.status_code}): {r.text}")
 
-#  ───────────────────────────  Public helper  ───────────────────────────────
+# ───────────────────────────  Public helper  ───────────────────────────────
 
 def ensure_auth() -> Literal["gmail", "outlook"]:
-    """Prompt user (unless MAIL_PROVIDER env var is set) and make sure the
-    chosen provider is authenticated *and* credentials saved into PACKAGE_ROOT
-    before Crew starts."""
+    """Prompt the user (unless *MAIL_PROVIDER* env var is set) and make sure the
+    chosen provider is authenticated *and* credentials saved into *PACKAGE_ROOT*.
+    """
 
     provider = os.getenv("MAIL_PROVIDER")
     if provider:
@@ -152,7 +203,7 @@ def ensure_auth() -> Literal["gmail", "outlook"]:
         print(
             "⚙️  Výběr e‑mail poskytovatele:\n  [G] Gmail (OAuth – browser)\n  [O] Outlook / Microsoft 365 (device‑code)\n"
         )
-        provider = (input("Vyber G/O » ") or "g").strip().lower()
+        provider = (input("Choose G/O » ") or "g").strip().lower()
 
     if provider.startswith("g"):
         _ensure_gmail_token()

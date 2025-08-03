@@ -3,10 +3,31 @@ import os, sys, json, glob, time, schedule
 from typing import List, Dict, Any
 from gmail_client import GmailClient
 from labeler_app import LabelerApp, AppConfig
-from llm_classifier import classify_email  # Importuj funkci pro klasifikaci
+from auth_setup_gmail import ensure_auth  # Importuj funkci pro autentizaci
+from pathlib import Path
+
+# ─── paths ──────────────────────────────────────────────────
+account_stored = Path("./accounts")
+account_stored.mkdir(exist_ok=True)  # vytvoří adresář, pokud neexistuje
+
+search_profiles = Path("./search_profiles")
+search_profiles.mkdir(exist_ok=True)  # vytvoří adresář, pokud neexistuje
+
+
+# ─── authorization ───────────────────────────────────────────────────
+answer = input("Need authentication for Gmail API? (y/n): ").strip().lower()
+if answer.strip().lower() in ("y"):
+    print("🔑 Running Gmail authentication flow …")
+    try:
+        creds = ensure_auth()  # Zajišťuje, že token je platný
+        print("✅ Authentication successful.")
+    except Exception as e:
+        print(f"❌ Error during authentication: {e}")
+        sys.exit(1)
+
 
 # ─── tokeny / účty ───────────────────────────────────────────────────
-tokens   = [f for f in os.listdir() if f.startswith("token_") and f.endswith(".json")]
+tokens   = [f for f in os.listdir(Path(account_stored)) if f.startswith("token_") and f.endswith(".json")]
 accounts = [f.replace("token_", "").replace("_at_", "@").replace(".json", "") for f in tokens]
 if not accounts:
     print("❌ Nenalezen žádný token."); sys.exit(1)
@@ -20,7 +41,7 @@ chosen = accounts if choice == "0" else [accounts[int(choice)-1]]
 # ─── loader profilů ──────────────────────────────────────────────────
 def load_profiles() -> List[AppConfig]:
     profs: List[AppConfig] = []
-    for path in glob.glob("profiles/*.json"):
+    for path in glob.glob(Path(search_profiles) / "*.json"):
         with open(path, encoding="utf-8") as f:
             data: Dict[str, Any] = json.load(f)
 
