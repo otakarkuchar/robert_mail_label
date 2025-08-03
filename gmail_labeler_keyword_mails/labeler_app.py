@@ -90,7 +90,7 @@ class LabelerApp:
         # C_DONE = "#B0B0B0"  # šedá
 
         self.pos_id = self.labels.get_or_create(f"{ml}/POZITIVNÍ ODPOVĚĎ", color_hex=C_POS)
-        self.pos_id = self.labels.get_or_create(f"{ml}/POZITIVNÍ ODPOVĚĎ_TERMÍN", color_hex=C_POS)
+        self.pos_term_id = self.labels.get_or_create(f"{ml}/POZITIVNÍ ODPOVĚĎ_TERMÍN", color_hex=C_POS)
         self.neg_id = self.labels.get_or_create(f"{ml}/NEGATIVNÍ ODPOVĚĎ", color_hex=C_NEG)
         self.neu_id = self.labels.get_or_create(f"{ml}/NEUTRÁLNÍ ODPOVĚĎ", color_hex=C_NEU)
         self.done_id = self.labels.get_or_create(f"{ml}/PROCESSED", color_hex="#9aa0a6")
@@ -155,18 +155,21 @@ class LabelerApp:
         # předáme nové údaje LLM-klasifikátoru
         sentiment = self.llm.classify(
             text,
-            deadline_date=deadline_date,
-            email_date=email_date,
+            # deadline_date=deadline_date,
+            # email_date=email_date,
+            deadline_date="2025-08-10",
+            email_date="2025-08-03",
         )
 
         tag = {
-            "positive": self.pos_id,
-            "negative": self.neg_id,
-            "neutral":  self.neu_id,
-        }[sentiment]
+                "positive":             self.pos_id,
+                "positive_out_of_term": self.pos_term_id,   # ⬅ přidáno
+                "negative":             self.neg_id,
+                "neutral":              self.neu_id,
+                }[sentiment]
 
         # vyčisti staré štítky a přidej nové
-        self.gmail.modify_labels(msg_id, remove=[self.pos_id, self.neg_id, self.neu_id])
+        self.gmail.modify_labels(msg_id, remove=[self.pos_id, self.pos_term_id, self.neg_id, self.neu_id])
         self.gmail.modify_labels(
             msg_id,
             add=[tag, self.done_id, self.labels.id(self.cfg.main_label)],
@@ -175,6 +178,8 @@ class LabelerApp:
         # přepošli jen kladné odpovědi, když je forwarder aktivní
         if sentiment == "positive" and self.forwarder:
             self.forwarder.forward(msg_id, f"{self.cfg.main_label}/POZITIVNÍ ODPOVĚĎ")
+        elif sentiment == "positive_out_of_term" and self.forwarder:
+            self.forwarder.forward(msg_id, f"{self.cfg.main_label}/POZITIVNÍ ODPOVĚĎ_TERMÍN")
 
         logging.info("msg %s → %s", msg_id, sentiment)
 

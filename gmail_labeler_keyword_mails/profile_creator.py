@@ -21,6 +21,7 @@ class ProfileData:
     header_name: str = "X-Label"
     schedule_minutes: int | None = None
     include_sent: bool = False          # ← NEW
+    deadline_date: str | None = None  # ISO YYYY-MM-DD
 
 
 class ProfileCreator:
@@ -61,6 +62,8 @@ if __name__ == "__main__":
 
     inc_sent = input("Zahrnout odeslané zprávy? (y/N): ").strip().lower().startswith("y")
 
+    ddl = input("Globální deadline (YYYY-MM-DD, Enter = žádný): ").strip() or None
+
     data = ProfileData(
         main_label          = main_label,
         keywords            = kws,
@@ -69,6 +72,7 @@ if __name__ == "__main__":
         forward_to          = fwd,
         schedule_minutes    = sched,
         include_sent        = inc_sent,
+        deadline_date       = ddl if ddl else None,
     )
 
     try:
