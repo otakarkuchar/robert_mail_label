@@ -190,7 +190,7 @@ if __name__ == "__main__":
     tests = [
         ("Yes, we can supply everything, but production slot opens in 5 weeks.", "positive_out_of_term"),
         ("If everything goes well, dispatch in 18 days.", "positive_out_of_term"),
-        ("Yes, we can ship within 12 days.", "positive"),
+        ("Yes, we can ship within 120 days.", "positive", "2027-09-01", "2025-09-10"),
         ("No capacity right now; please ask next year.", "negative"),
         ("Out of stock, but charcoal variant ships tomorrow.", "neutral"),
         ("We need about three weeks; is that still fine?", "positive_out_of_term"),
@@ -261,4 +261,3 @@ if __name__ == "__main__":
     print(f"Incorrect predictions: {incorrect}")
     print(
         f"Critical errors (positive <-> negative): {error_details['positive_to_negative']} / {error_details['negative_to_positive']}")
-

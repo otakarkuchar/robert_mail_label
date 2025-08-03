@@ -1,10 +1,9 @@
-"""main.py – načte profily, spustí run nebo společný/batch scheduler."""
 from __future__ import annotations
 import os, sys, json, glob, time, schedule
 from typing import List, Dict, Any
-
-from gmail_client   import GmailClient
-from labeler_app    import LabelerApp, AppConfig
+from gmail_client import GmailClient
+from labeler_app import LabelerApp, AppConfig
+from llm_classifier import classify_email  # Importuj funkci pro klasifikaci
 
 # ─── tokeny / účty ───────────────────────────────────────────────────
 tokens   = [f for f in os.listdir() if f.startswith("token_") and f.endswith(".json")]
@@ -32,7 +31,7 @@ def load_profiles() -> List[AppConfig]:
             forward_to=data.get("forward_to"),
             keywords_file=None,
             emails_file=None,
-            llm_model=data.get("llm_model", "mistral"),  # ← přidáno
+            llm_model=data.get("llm_model", "ollama/mistral:latest"),  # ← přidáno
             llm_confidence=data.get("llm_confidence", 0.20),  # ← a rovnou i threshold
         )
 
@@ -68,7 +67,8 @@ for acc in chosen:
 
 # ─── režimy ─────────────────────────────────────────────────────────
 if mode == "1":
-    for app in apps: app.run_once()
+    for app in apps:
+        app.run_once()
 
 elif mode == "2":                       # každý profil zvlášť
     for app in apps:

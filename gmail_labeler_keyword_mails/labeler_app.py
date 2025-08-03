@@ -14,7 +14,7 @@ from gmail_client   import GmailClient
 from label_manager  import LabelManager
 from message_filter import MessageFilter
 from forwarder      import Forwarder
-from llm_classifier import LLMClassifier
+from llm_classifier_date import LLMClassifier
 
 
 # ── konfigurace profilu (loader vyplní všechno) ─────────────────────
@@ -69,7 +69,7 @@ class LabelerApp:
             intersection_labels=cfg.intersection_labels,
             include_sent=cfg.include_sent,
         )
-        self.llm       = LLMClassifier(cfg.llm_model, neutrality=cfg.llm_confidence)
+        self.llm = LLMClassifier(model=cfg.llm_model, lead_limit_days=cfg.llm_confidence)
         self.forwarder = Forwarder(gmail, forward_to=cfg.forward_to) if cfg.forward_to else None
 
         # štítky pro výsledky + PROCESSED
@@ -90,6 +90,7 @@ class LabelerApp:
         # C_DONE = "#B0B0B0"  # šedá
 
         self.pos_id = self.labels.get_or_create(f"{ml}/POZITIVNÍ ODPOVĚĎ", color_hex=C_POS)
+        self.pos_id = self.labels.get_or_create(f"{ml}/POZITIVNÍ ODPOVĚĎ_TERMÍN", color_hex=C_POS)
         self.neg_id = self.labels.get_or_create(f"{ml}/NEGATIVNÍ ODPOVĚĎ", color_hex=C_NEG)
         self.neu_id = self.labels.get_or_create(f"{ml}/NEUTRÁLNÍ ODPOVĚĎ", color_hex=C_NEU)
         self.done_id = self.labels.get_or_create(f"{ml}/PROCESSED", color_hex="#9aa0a6")
@@ -143,7 +144,7 @@ class LabelerApp:
 
     def _classify_and_tag(self, msg_id: str):
         text = self._plain_text(msg_id)
-        sentiment = self.llm.predict(text)
+        sentiment = self.llm.classify(text)
 
         tag = {"positive": self.pos_id,
                "negative": self.neg_id,
