@@ -192,19 +192,19 @@ def _ensure_outlook_token() -> None:
 # ───────────────────────────  Public helper  ───────────────────────────────
 
 def ensure_auth() -> Literal["gmail", "outlook"]:
-    """Prompt the user (unless *MAIL_PROVIDER* env var is set) and make sure the
-    chosen provider is authenticated *and* credentials saved into *PACKAGE_ROOT*.
-    """
-
+    """Prompt the user to ensure authentication for Gmail or Outlook."""
     provider = os.getenv("MAIL_PROVIDER")
     if provider:
         provider = provider.lower()
     else:
-        # print(
-        #     "⚙️  Výběr e‑mail poskytovatele:\n  [G] Gmail (OAuth – browser)\n  [O] Outlook / Microsoft 365 (device‑code)\n"
-        # )
-        # provider = (input("Choose G/O » ") or "g").strip().lower()
-        provider = "g" # Default to Gmail for simplicity
+        provider = "g"  # Default to Gmail for simplicity
+
+    # Ask if the user wants to authenticate with a new account
+    force_new_auth = input("Do you want to authenticate with a new account? (y/n): ").strip().lower()
+    if force_new_auth == "y":
+        # Proceed with the authentication flow without specifying an email address
+        _ensure_gmail_token()  # This will initiate the OAuth flow
+        return "gmail"
 
     if provider.startswith("g"):
         _ensure_gmail_token()
@@ -213,4 +213,4 @@ def ensure_auth() -> Literal["gmail", "outlook"]:
         _ensure_outlook_token()
         return "outlook"
 
-    sys.exit("❌ Neplatná volba – použij G nebo O.")
+    sys.exit("❌ Invalid choice – use G or O.")
