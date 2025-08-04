@@ -37,6 +37,7 @@ for i, mail in enumerate(accounts, 1):
     print(f" {i}: {mail}")
 choice = input("Vyber účet (0=all): ").strip()
 chosen = accounts if choice == "0" else [accounts[int(choice)-1]]
+chosen_token = tokens if choice == "0" else [tokens[int(choice)-1]]
 
 # ─── loader profilů ──────────────────────────────────────────────────
 def load_profiles() -> List[AppConfig]:
@@ -80,7 +81,7 @@ if mode in ("2", "b"):
 
 # ─── vytvoř klienty / app instanc e───────────────────────────────────
 apps: List[LabelerApp] = []
-for acc, token in zip(chosen, tokens):
+for acc, token in zip(chosen, chosen_token):
     print(f"🔗 Připojuji k účtu: {acc} (token: {token})")
     token_path = str(account_stored / token)
     cli = GmailClient(acc, token_path)
