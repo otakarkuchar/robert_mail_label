@@ -24,7 +24,7 @@ import requests
 from msal import PublicClientApplication, SerializableTokenCache
 
 # ────────────────────────────  Package root  ───────────────────────────────
-PACKAGE_ROOT: Final[Path] = Path(__file__).resolve().parents[0]
+PACKAGE_ROOT: Final[Path] = Path(__file__).resolve().parents[0] / "accounts"
 OUTLOOK_CACHE_PATH: Final[Path] = PACKAGE_ROOT / ".msal_token_cache.bin"
 
 # ───────────────────────────────  Gmail  ───────────────────────────────────
@@ -200,10 +200,11 @@ def ensure_auth() -> Literal["gmail", "outlook"]:
     if provider:
         provider = provider.lower()
     else:
-        print(
-            "⚙️  Výběr e‑mail poskytovatele:\n  [G] Gmail (OAuth – browser)\n  [O] Outlook / Microsoft 365 (device‑code)\n"
-        )
-        provider = (input("Choose G/O » ") or "g").strip().lower()
+        # print(
+        #     "⚙️  Výběr e‑mail poskytovatele:\n  [G] Gmail (OAuth – browser)\n  [O] Outlook / Microsoft 365 (device‑code)\n"
+        # )
+        # provider = (input("Choose G/O » ") or "g").strip().lower()
+        provider = "g" # Default to Gmail for simplicity
 
     if provider.startswith("g"):
         _ensure_gmail_token()

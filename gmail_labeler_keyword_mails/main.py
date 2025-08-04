@@ -41,7 +41,7 @@ chosen = accounts if choice == "0" else [accounts[int(choice)-1]]
 # ─── loader profilů ──────────────────────────────────────────────────
 def load_profiles() -> List[AppConfig]:
     profs: List[AppConfig] = []
-    for path in glob.glob(Path(search_profiles) / "*.json"):
+    for path in glob.glob(str(search_profiles / "*.json")):
         with open(path, encoding="utf-8") as f:
             data: Dict[str, Any] = json.load(f)
 
@@ -80,8 +80,10 @@ if mode in ("2", "b"):
 
 # ─── vytvoř klienty / app instanc e───────────────────────────────────
 apps: List[LabelerApp] = []
-for acc in chosen:
-    cli = GmailClient(acc)
+for acc, token in zip(chosen, tokens):
+    print(f"🔗 Připojuji k účtu: {acc} (token: {token})")
+    token_path = str(account_stored / token)
+    cli = GmailClient(acc, token_path)
     for cfg in profiles:
         app = LabelerApp(cli, cfg, include_sent=cfg.include_sent)  # předáme include_sent
         apps.append(app)

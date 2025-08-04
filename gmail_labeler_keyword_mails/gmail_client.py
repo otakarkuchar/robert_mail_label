@@ -13,6 +13,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from pathlib import Path
 
 SCOPES = ["https://mail.google.com/"]
 
@@ -20,7 +21,7 @@ SCOPES = ["https://mail.google.com/"]
 class GmailClient:
     """Zabalí opakované operace Gmail API do přehledných metod."""
 
-    def __init__(self, user_email: str, credentials_path: str = "credentials.json"):
+    def __init__(self, user_email: str, credentials_path: str or Path = "credentials.json"):
         self.user_email = user_email
         self._service = self._authenticate(user_email, credentials_path)
 
@@ -82,7 +83,8 @@ class GmailClient:
 
     @staticmethod
     def _authenticate(user_email: str, credentials_path: str):
-        token_file = f"token_{user_email.replace('@', '_at_')}.json"
+        # token_file = f"token_{user_email.replace('@', '_at_')}.json"
+        token_file = credentials_path
         creds = None
 
         if os.path.exists(token_file):
