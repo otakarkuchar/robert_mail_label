@@ -15,7 +15,11 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from pathlib import Path
 
-SCOPES = ["https://mail.google.com/"]
+# SCOPES = ["https://mail.google.com/"]
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.send",
+]
 
 
 class GmailClient:
@@ -83,24 +87,36 @@ class GmailClient:
 
     @staticmethod
     def _authenticate(user_email: str, credentials_path: str):
-        # token_file = f"token_{user_email.replace('@', '_at_')}.json"
         token_file = credentials_path
         creds = None
 
         if os.path.exists(token_file):
             creds = Credentials.from_authorized_user_file(token_file, SCOPES)
+            print(f"✅ Token načten: {token_file}")
+        else:
+            print(f"❌ Token soubor neexistuje: {token_file}")
 
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
+                print("🔄 Token je vypršený, pokus o obnovení...")
                 try:
                     creds.refresh(Request())
+                    print("🔄 Obnovení tokenu úspěšné!")
                 except Exception as e:
                     print(f"⚠️  Obnovení tokenu selhalo: {e}")
+                    print(f"🎯 Detail chyby: {str(e)}")
                     creds = None
+            else:
+                print("❌ Token je buď neplatný nebo nemá refresh token.")
+
             if not creds or not creds.valid:
+                print("🔑 Provádí se nová autentizace...")
                 flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
                 creds = flow.run_local_server(port=8081, prompt="consent")
-            with open(token_file, "w", encoding="utf-8") as f:
-                f.write(creds.to_json())
+                print("✅ Nový token získán.")
+                with open(token_file, "w", encoding="utf-8") as f:
+                    f.write(creds.to_json())
+                print(f"✅ Token uložen do souboru: {token_file}")
 
         return build("gmail", "v1", credentials=creds)
+
