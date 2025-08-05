@@ -1,5 +1,8 @@
 from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QLabel, QMessageBox
 from PySide6.QtCore import Qt
+from auth_setup_gmail import ensure_auth  # Importování tvé autentifikační funkce
+from gmail_client import GmailClient  # Pro připojení k Gmailu
+import json
 
 class AppGUI(QWidget):
     def __init__(self):
@@ -8,6 +11,9 @@ class AppGUI(QWidget):
         self.setWindowTitle("LabelerApp")
         self.setGeometry(100, 100, 500, 350)
         self.setStyleSheet("background-color: #181818;")  # Dark background
+
+        self.gmail_client = None  # Počáteční stav, Gmail klient není autentifikován
+        self.labeler_app = None  # Bude vytvořeno po autentifikaci a nastavení profilu
 
         # Layout pro hlavní tlačítka
         main_layout = QVBoxLayout()
@@ -77,32 +83,14 @@ class AppGUI(QWidget):
             }}
         """
 
-    def start_classifying(self):
-        """Simulace spuštění klasifikace."""
-        self.status_label.setText("Status: Classifying in progress...")
-        # Zde by byla volání skutečné funkce pro klasifikaci
-        QMessageBox.information(self, "Started", "Classification process started.")
-        self.status_label.setText("Status: Ready")
-
-    def schedule_classifying(self):
-        """Simulace naplánování klasifikace."""
-        self.status_label.setText("Status: Scheduling classification every 60 minutes...")
-        # Zde by byla volání skutečné funkce pro plánování
-        QMessageBox.information(self, "Scheduled", "Classification scheduled every 60 minutes.")
-        self.status_label.setText("Status: Ready")
-
-    def create_profile(self):
-        """Simulace vytvoření profilu."""
-        self.status_label.setText("Status: Creating profile...")
-        # Zde by byla volání skutečné funkce pro vytvoření profilu
-        QMessageBox.information(self, "Profile Created", "Profile created successfully.")
-        self.status_label.setText("Status: Ready")
-
     def authenticate_google(self):
-        """Simulace autentifikace přes Google."""
+        """Spuštění autentifikace přes Google."""
         self.status_label.setText("Status: Authenticating with Google 🔑...")
-        # Zde by byla volání skutečné funkce pro autentifikaci
-        self.update_google_auth_status(success=True)
+        try:
+            provider = ensure_auth()  # Zavolání funkce pro autentifikaci
+            self.update_google_auth_status(success=True)
+        except Exception as e:
+            self.update_google_auth_status(success=False)
         self.status_label.setText("Status: Ready")
 
     def update_google_auth_status(self, success: bool):
@@ -115,6 +103,47 @@ class AppGUI(QWidget):
             QMessageBox.critical(self, "Error", "Google authentication failed. ❌")
             self.google_auth_button.setText("Authenticate with Google 🔑")
             self.google_auth_button.setStyleSheet(self.button_style("#8BC34A"))  # Light Green
+
+    def start_classifying(self):
+        """Spuštění klasifikace e-mailů pomocí LLM."""
+        if self.labeler_app:
+            self.status_label.setText("Status: Classifying in progress...")
+            self.labeler_app.run_once()  # Spustí klasifikaci dle profilu
+            QMessageBox.information(self, "Started", "Classification process started.")
+            self.status_label.setText("Status: Ready")
+        else:
+            QMessageBox.warning(self, "Error", "Google authentication required to start.")
+
+    def schedule_classifying(self):
+        """Naplánování klasifikace e-mailů každých 60 minut."""
+        if self.labeler_app:
+            self.status_label.setText("Status: Scheduling classification every 60 minutes...")
+            self.labeler_app.schedule(60)  # Spustí plánování každých 60 minut
+            QMessageBox.information(self, "Scheduled", "Classification scheduled every 60 minutes.")
+            self.status_label.setText("Status: Ready")
+        else:
+            QMessageBox.warning(self, "Error", "Google authentication required to schedule.")
+
+    def create_profile(self):
+        """Vytvoření profilu pro LabelerApp."""
+        self.status_label.setText("Status: Creating profile...")
+        profile_data = self._load_profile_data()  # Načte data z JSON
+        if profile_data:
+            # Vytvoří profil a předá ho do LabelerApp
+            app_config = AppConfig(**profile_data)
+            self.labeler_app = LabelerApp(gmail=self.gmail_client, cfg=app_config)
+            QMessageBox.information(self, "Profile Created", "Profile created successfully.")
+        self.status_label.setText("Status: Ready")
+
+    def _load_profile_data(self):
+        """Načte profilová data z JSON souboru (např. bricks.json)."""
+        profile_path = "profiles/bricks.json"  # Mělo by být dynamické podle vybraného profilu
+        try:
+            with open(profile_path, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            QMessageBox.critical(self, "Error", "Profile file not found.")
+            return None
 
     def quit_app(self):
         """Ukončení aplikace."""
