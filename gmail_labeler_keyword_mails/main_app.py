@@ -1,8 +1,11 @@
-from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QLabel, QMessageBox
+from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QLabel, QMessageBox, QComboBox
 from PySide6.QtCore import Qt
-from auth_setup_gmail import ensure_auth  # Importování tvé autentifikační funkce
-from gmail_client import GmailClient  # Pro připojení k Gmailu
+from auth_setup_gmail import ensure_auth
+from gmail_client import GmailClient
 import json
+from pathlib import Path
+import os
+
 
 class AppGUI(QWidget):
     def __init__(self):
@@ -30,7 +33,7 @@ class AppGUI(QWidget):
         # Tlačítka pro hlavní akce
         self.start_button = QPushButton("Start Classifying 📝")
         self.start_button.setStyleSheet(self.button_style("#4CAF50"))  # Green
-        self.start_button.clicked.connect(self.start_classifying)
+        self.start_button.clicked.connect(self.start_classifying)  # Tato linie zavolá metodu start_classifying
         button_layout.addWidget(self.start_button)
 
         self.schedule_button = QPushButton("Schedule Classification ⏱️")
@@ -43,10 +46,21 @@ class AppGUI(QWidget):
         self.create_profile_button.clicked.connect(self.create_profile)
         button_layout.addWidget(self.create_profile_button)
 
+        self.delete_profile_button = QPushButton("Delete Profile 🗑️")
+        self.delete_profile_button.setStyleSheet(self.button_style("#F44336"))  # Red
+        self.delete_profile_button.clicked.connect(self.delete_profile)
+        button_layout.addWidget(self.delete_profile_button)
+
         self.google_auth_button = QPushButton("Authenticate with Google 🔑")
         self.google_auth_button.setStyleSheet(self.button_style("#8BC34A"))  # Light Green
         self.google_auth_button.clicked.connect(self.authenticate_google)
         button_layout.addWidget(self.google_auth_button)
+
+        # ComboBox pro výběr profilu
+        self.profile_selector = QComboBox(self)
+        self.profile_selector.setStyleSheet("font-size: 16px;")
+        self.load_profiles()  # Načte profily do ComboBoxu
+        button_layout.addWidget(self.profile_selector)
 
         # Tlačítko pro ukončení aplikace
         self.quit_button = QPushButton("Quit ❌")
@@ -83,12 +97,24 @@ class AppGUI(QWidget):
             }}
         """
 
+    def load_profiles(self):
+        """Načte dostupné profily ze složky 'profiles'."""
+        profiles_dir = Path(__file__).resolve().parent / "profiles"
+        profiles = [f.stem for f in profiles_dir.glob("*.json")]  # Načte názvy souborů bez přípony
+        self.profile_selector.clear()  # Vyčistí ComboBox
+        self.profile_selector.addItems(profiles)  # Přidá položky do ComboBoxu
+
     def authenticate_google(self):
         """Spuštění autentifikace přes Google."""
         self.status_label.setText("Status: Authenticating with Google 🔑...")
         try:
             provider = ensure_auth()  # Zavolání funkce pro autentifikaci
-            self.update_google_auth_status(success=True)
+            if provider == "gmail":
+                self.gmail_client = GmailClient(
+                    user_email="your_email@example.com")  # Tady bys měl načíst skutečný email
+                self.update_google_auth_status(success=True)
+            else:
+                self.update_google_auth_status(success=False)
         except Exception as e:
             self.update_google_auth_status(success=False)
         self.status_label.setText("Status: Ready")
@@ -145,9 +171,27 @@ class AppGUI(QWidget):
             QMessageBox.critical(self, "Error", "Profile file not found.")
             return None
 
+    def delete_profile(self):
+        """Smazání vybraného profilu."""
+        selected_profile = self.profile_selector.currentText()
+        if not selected_profile:
+            QMessageBox.warning(self, "Error", "No profile selected.")
+            return
+
+        profiles_dir = Path(__file__).resolve().parent / "profiles"
+        profile_path = profiles_dir / f"{selected_profile}.json"
+
+        if profile_path.exists():
+            profile_path.unlink()  # Smaže soubor
+            self.load_profiles()  # Načte seznam profilů
+            QMessageBox.information(self, "Profile Deleted", f"Profile {selected_profile} deleted successfully.")
+        else:
+            QMessageBox.warning(self, "Error", f"Profile {selected_profile} not found.")
+
     def quit_app(self):
         """Ukončení aplikace."""
         self.close()
+
 
 if __name__ == "__main__":
     app = QApplication([])
