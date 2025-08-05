@@ -1,14 +1,13 @@
 from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QLabel, QMessageBox
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
-import random
 
 class AppGUI(QWidget):
     def __init__(self):
         super().__init__()
 
         self.setWindowTitle("LabelerApp")
-        self.setGeometry(100, 100, 500, 400)
+        self.setGeometry(100, 100, 500, 350)
+        self.setStyleSheet("background-color: #181818;")  # Dark background
 
         # Layout pro hlavní tlačítka
         main_layout = QVBoxLayout()
@@ -16,7 +15,7 @@ class AppGUI(QWidget):
         # Titulek
         self.title_label = QLabel("Labeler Application", self)
         self.title_label.setAlignment(Qt.AlignCenter)
-        self.title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        self.title_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #FFFFFF;")
         main_layout.addWidget(self.title_label)
 
         # Sekce pro tlačítka
@@ -24,28 +23,28 @@ class AppGUI(QWidget):
 
         # Tlačítka pro hlavní akce
         self.start_button = QPushButton("Start Classifying 📝")
-        self.start_button.setStyleSheet(self.button_style("lightgreen"))
+        self.start_button.setStyleSheet(self.button_style("#4CAF50"))  # Green
         self.start_button.clicked.connect(self.start_classifying)
         button_layout.addWidget(self.start_button)
 
         self.schedule_button = QPushButton("Schedule Classification ⏱️")
-        self.schedule_button.setStyleSheet(self.button_style("lightblue"))
+        self.schedule_button.setStyleSheet(self.button_style("#03A9F4"))  # Blue
         self.schedule_button.clicked.connect(self.schedule_classifying)
         button_layout.addWidget(self.schedule_button)
 
         self.create_profile_button = QPushButton("Create Profile 🆕")
-        self.create_profile_button.setStyleSheet(self.button_style("lightgray"))
+        self.create_profile_button.setStyleSheet(self.button_style("#FF9800"))  # Orange
         self.create_profile_button.clicked.connect(self.create_profile)
         button_layout.addWidget(self.create_profile_button)
 
         self.google_auth_button = QPushButton("Authenticate with Google 🔑")
-        self.google_auth_button.setStyleSheet(self.button_style("lightyellow"))
+        self.google_auth_button.setStyleSheet(self.button_style("#8BC34A"))  # Light Green
         self.google_auth_button.clicked.connect(self.authenticate_google)
         button_layout.addWidget(self.google_auth_button)
 
         # Tlačítko pro ukončení aplikace
         self.quit_button = QPushButton("Quit ❌")
-        self.quit_button.setStyleSheet(self.button_style("lightcoral"))
+        self.quit_button.setStyleSheet(self.button_style("#B71C1C"))  # Red
         self.quit_button.clicked.connect(self.quit_app)
         button_layout.addWidget(self.quit_button)
 
@@ -66,14 +65,15 @@ class AppGUI(QWidget):
         return f"""
             QPushButton {{
                 background-color: {color};
-                color: #333;
+                color: #FFFFFF;
                 font-size: 16px;
                 border-radius: 5px;
                 padding: 12px;
-                margin: 5px;
+                margin: 10px 0;
+                border: none;
             }}
             QPushButton:hover {{
-                background-color: #ddd;
+                background-color: #555;
             }}
         """
 
@@ -110,11 +110,11 @@ class AppGUI(QWidget):
         if success:
             QMessageBox.information(self, "Success", "Google authentication successful! 👍")
             self.google_auth_button.setText("Authenticated with Google ✅")
-            self.google_auth_button.setStyleSheet(self.button_style("lightgreen"))
+            self.google_auth_button.setStyleSheet(self.button_style("#4CAF50"))  # Green
         else:
             QMessageBox.critical(self, "Error", "Google authentication failed. ❌")
             self.google_auth_button.setText("Authenticate with Google 🔑")
-            self.google_auth_button.setStyleSheet(self.button_style("lightyellow"))
+            self.google_auth_button.setStyleSheet(self.button_style("#8BC34A"))  # Light Green
 
     def quit_app(self):
         """Ukončení aplikace."""
